@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List
+from typing import List, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +16,11 @@ class Settings(BaseSettings):
 
     # AI & Embeddings Flag
     EMBEDDINGS_ENABLED: bool = True
+
+    # AI & LLM Provider Settings
+    AI_PROVIDER: str = "gemini"
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: str = "gemini-2.5-flash"
 
     SECRET_KEY: str = "datapulse-production-secret-key-replace-in-env"
     DATABASE_PATH: str = "datapulse.db"

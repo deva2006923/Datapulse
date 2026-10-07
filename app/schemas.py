@@ -99,6 +99,9 @@ class QueryResponse(BaseModel):
     records_analyzed: int
     relevance_score: float
     method: str
+    sql_query: Optional[str] = Field(default=None, description="Generated and executed SQL query")
+    columns: Optional[List[str]] = Field(default=None, description="Column names returned by the query")
+    results: Optional[List[Dict[str, Any]]] = Field(default=None, description="Actual data rows returned from DuckDB")
 
 
 # Credit & Redemption Schemas
