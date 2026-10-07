@@ -191,3 +191,95 @@ def test_dataset_owner_relationship_preserved(client, auth_header):
     reg = duckdb_conn.execute("SELECT user_id FROM _dataset_registry WHERE dataset_id = ?", [dataset_id]).fetchone()
     assert reg is not None
     assert reg[0] == user_id
+
+
+def test_sales_csv_persistence_and_safe_duckdb_storage(client, auth_header):
+    """Verify Part 2 specific requirements: upload sales.csv and confirm rows persist in DuckDB."""
+    sales_csv = (
+        "product,region,sales\n"
+        "Laptop,North,50000\n"
+        "Phone,South,30000\n"
+        "Laptop,South,45000\n"
+    )
+    files = {"file": ("sales.csv", sales_csv, "text/csv")}
+    res = client.post(
+        "/datasets/upload",
+        headers=auth_header,
+        files=files,
+        data={"domain": "ecommerce", "name": "Sales Data"}
+    )
+    assert res.status_code == 201
+    data = res.json()
+    dataset_id = data["id"]
+
+    # 1. Unique dataset_id generated
+    assert dataset_id.startswith("ds_")
+
+    # 2. Metadata stored in SQLite
+    sqlite_conn = get_db_connection()
+    row = sqlite_conn.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+    assert row is not None
+    assert row["rows_count"] == 3
+    assert row["columns_count"] == 3
+    assert row["user_id"] == data["user_id"]
+
+    # 3. DuckDB table created with safe identifier
+    safe_table = get_dataset_table_name(dataset_id)
+    assert safe_table.startswith("dataset_ds_")
+    assert dataset_table_exists(dataset_id) is True
+
+    # 4. Actual rows inserted into DuckDB
+    assert get_dataset_row_count(dataset_id) == 3
+    rows = get_dataset_rows(dataset_id, limit=10)
+    assert len(rows) == 3
+    assert rows[0]["product"] == "Laptop"
+    assert rows[0]["region"] == "North"
+    assert rows[0]["sales"] == 50000
+    assert rows[1]["product"] == "Phone"
+    assert rows[2]["sales"] == 45000
+
+    # 5. Physical storage path never exposed in response
+    assert "storage_path" not in data
+    assert "file_path" not in data
+    assert "duckdb_path" not in data
+
+
+def test_storage_rollback_on_failure(client, auth_header, monkeypatch):
+    """Verify rollback ensures no orphaned DuckDB table or file remains after failure."""
+    from app.services import storage as storage_module
+    import app.routers.datasets as datasets_router
+
+    csv_data = "col1,col2\n10,20\n30,40\n"
+    files = {"file": ("rollback_test.csv", csv_data, "text/csv")}
+
+    captured_dataset_ids = []
+    original_persist = storage_module.persist_dataset
+
+    def failing_persist(*args, **kwargs):
+        dataset_id = kwargs.get("dataset_id") or args[0]
+        captured_dataset_ids.append(dataset_id)
+        # Call original persist to create files and tables, then simulate a subsequent error
+        original_persist(*args, **kwargs)
+        raise RuntimeError("Simulated DuckDB error during post-persist processing")
+
+    monkeypatch.setattr(datasets_router, "persist_dataset", failing_persist)
+
+    res = client.post("/datasets/upload", headers=auth_header, files=files)
+    assert res.status_code == 422
+    assert "Failed to persist dataset into analytical storage" in res.json()["detail"]
+
+    assert len(captured_dataset_ids) == 1
+    failed_id = captured_dataset_ids[0]
+
+    # Verify no orphaned table exists in DuckDB
+    assert dataset_table_exists(failed_id) is False
+
+    # Verify no orphaned file on disk
+    orphaned_file = os.path.join(settings.DATASETS_STORAGE_DIR, f"{failed_id}.csv")
+    assert not os.path.exists(orphaned_file)
+
+    # Verify no orphaned record in _dataset_registry
+    duckdb_conn = get_duckdb_connection()
+    reg = duckdb_conn.execute("SELECT * FROM _dataset_registry WHERE dataset_id = ?", [failed_id]).fetchall()
+    assert len(reg) == 0
+
