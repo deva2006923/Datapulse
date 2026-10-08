@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_MODEL: str = "gemini-2.5-flash"
 
+    # Marketplace / Credits Settings
+    QUERY_COST: int = 1
+    DATASET_OWNER_REWARD: int = 1
+
     SECRET_KEY: str = "datapulse-production-secret-key-replace-in-env"
     DATABASE_PATH: str = "datapulse.db"
     DUCKDB_PATH: str = "datapulse_analytics.duckdb"

@@ -102,6 +102,7 @@ class QueryResponse(BaseModel):
     sql_query: Optional[str] = Field(default=None, description="Generated and executed SQL query")
     columns: Optional[List[str]] = Field(default=None, description="Column names returned by the query")
     results: Optional[List[Dict[str, Any]]] = Field(default=None, description="Actual data rows returned from DuckDB")
+    credits_charged: Optional[int] = Field(default=None, description="Credits charged for this query")
 
 
 # Credit & Redemption Schemas

@@ -4,10 +4,15 @@ import datetime
 from fastapi import HTTPException, status, Depends
 from app.routers import TrailingSlashRouter
 from app.database import get_db_connection
-from app.auth import get_optional_user
+from app.auth import get_current_user
 from app.schemas import QueryRequest, QueryResponse
 from app.services.relevance import compute_relevance
 from app.config import settings
+from app.services.marketplace import (
+    check_query_permission_and_cost,
+    apply_query_marketplace_transaction,
+    InsufficientCreditsError
+)
 from app.services.storage import (
     get_dataset_table_name,
     dataset_table_exists,
@@ -32,7 +37,7 @@ router = TrailingSlashRouter(tags=["Query & Analysis"])
 
 
 @router.post("/query", response_model=QueryResponse)
-def execute_query(req: QueryRequest, user: dict = Depends(get_optional_user)):
+def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
     # 1. Validate query is not empty
     if not req.query or not req.query.strip():
         raise HTTPException(
@@ -89,8 +94,22 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_optional_user)):
 
     dataset_id = target_dataset["id"]
     domain = target_dataset.get("domain", "general")
+    owner_id = target_dataset.get("user_id")
 
-    # 3. Verify DuckDB table and schema
+    # 3. Credit Verification & Marketplace Cost Determination
+    try:
+        query_cost, owner_reward, is_own_dataset = check_query_permission_and_cost(
+            user_id=user["id"],
+            dataset_owner_id=owner_id,
+            conn=conn
+        )
+    except InsufficientCreditsError as e:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=str(e)
+        )
+
+    # 4. Verify DuckDB table and schema
     if not dataset_table_exists(dataset_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -113,7 +132,7 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_optional_user)):
 
     table_name = get_dataset_table_name(dataset_id)
 
-    # 4. Natural Language -> SQL Generation
+    # 5. Natural Language -> SQL Generation
     try:
         raw_sql = generate_sql(
             question=req.query,
@@ -128,7 +147,7 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_optional_user)):
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"AI SQL generation failed: {str(e)}")
 
-    # 5. SQL Validation & Security Enforcement
+    # 6. SQL Validation & Security Enforcement
     try:
         col_names = [c[0] for c in columns_with_types]
         validated_sql = validate_sql(
@@ -143,7 +162,7 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_optional_user)):
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"SQL Validation Error: {str(e)}")
 
-    # 6. Execute validated SQL against DuckDB
+    # 7. Execute validated SQL against DuckDB
     try:
         columns, results, records_analyzed = execute_sql(
             sql=validated_sql,
@@ -155,7 +174,7 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_optional_user)):
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Database execution error: {str(e)}")
 
-    # 7. Generate human-readable answer grounded in actual results
+    # 8. Generate human-readable answer grounded in actual results
     answer = synthesize_answer(
         question=req.query,
         sql=validated_sql,
@@ -164,26 +183,50 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_optional_user)):
         dataset_name=target_dataset["name"]
     )
 
-    # 8. Log query in SQLite catalog
+    # 9. Atomically process marketplace credit transaction and log query in catalog
     query_id = f"qry_{uuid.uuid4().hex[:12]}"
-    user_id = user["id"] if user else "anonymous"
     now = datetime.datetime.utcnow().isoformat()
-    cursor.execute("""
-        INSERT INTO queries (id, user_id, query_text, results_json, created_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        query_id,
-        user_id,
-        req.query,
-        json.dumps({
-            "answer": answer,
-            "sql_query": validated_sql,
-            "results_count": len(results),
-            "score": relevance_score
-        }),
-        now
-    ))
-    conn.commit()
+    try:
+        apply_query_marketplace_transaction(
+            conn=conn,
+            querying_user_id=user["id"],
+            dataset_owner_id=owner_id,
+            dataset_id=dataset_id,
+            dataset_name=target_dataset["name"],
+            query_id=query_id,
+            query_cost=query_cost,
+            owner_reward=owner_reward,
+            is_own_dataset=is_own_dataset,
+            now=now
+        )
+        cursor.execute("""
+            INSERT INTO queries (id, user_id, query_text, results_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            query_id,
+            user["id"],
+            req.query,
+            json.dumps({
+                "answer": answer,
+                "sql_query": validated_sql,
+                "results_count": len(results),
+                "score": relevance_score
+            }),
+            now
+        ))
+        conn.commit()
+    except InsufficientCreditsError as e:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=str(e)
+        )
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to record marketplace query transaction: {str(e)}"
+        )
 
     return QueryResponse(
         query=req.query,
@@ -194,5 +237,6 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_optional_user)):
         method="nl_to_sql",
         sql_query=validated_sql,
         columns=columns,
-        results=results
+        results=results,
+        credits_charged=query_cost
     )
