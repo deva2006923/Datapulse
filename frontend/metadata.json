@@ -1,0 +1,6 @@
+{
+  "name": "DataPulse - Vectorized Dataset Hub & Engine Console",
+  "description": "Real-time telemetry stream, dataset ingestion pipeline, multi-dimensional quantum vector sphere, and SQL sandbox console.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
