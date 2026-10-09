@@ -1,18 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Upload,
   ArrowRight,
   ArrowLeft,
   CheckCircle2,
   FileCode,
-  Sparkles,
   Coins,
-  Tag,
   X,
   Plus,
   AlertCircle,
 } from 'lucide-react';
-import { UserAccount, AppDataset, PageRoute } from '../types';
+import { UserAccount, AppDataset, PageRoute, BackendDatasetDetail, ColumnDefinition } from '../types';
+import { api } from '../services/api';
 
 interface UploadWizardViewProps {
   currentUser: UserAccount;
@@ -38,26 +37,23 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
   const [license, setLicense] = useState<string>('MIT');
 
   // Step 2: File Drop Zone
-  const [selectedFile, setSelectedFile] = useState<{ name: string; sizeMb: number; type: 'csv' | 'xlsx' } | null>({
-    name: 'customer_churn_q4_telecom.csv',
-    sizeMb: 12.4,
-    type: 'csv',
-  });
-  const [fileProgress, setFileProgress] = useState<number>(100);
+  const [selectedFile, setSelectedFile] = useState<{
+    name: string;
+    sizeMb: number;
+    type: 'csv' | 'xlsx';
+    rawFile?: File;
+  } | null>(null);
+  const [fileProgress, setFileProgress] = useState<number>(0);
   const [fileError, setFileError] = useState<string | null>(null);
 
-  // Step 3: Live Evaluation
+  // Step 3: Live Evaluation & Backend Upload State
   const [evalProgress, setEvalProgress] = useState<number>(0);
   const [evalStageIndex, setEvalStageIndex] = useState<number>(0);
+  const [isUploading, setIsUploading] = useState<boolean>(false);
   const [isEvaluating, setIsEvaluating] = useState<boolean>(false);
   const [evaluationComplete, setEvaluationComplete] = useState<boolean>(false);
-
-  // Evaluation Scores
-  const qualityScore = 85;
-  const relevanceScore = 90;
-  const overallScore = (qualityScore + relevanceScore) / 2; // 87.5
-  // Credit calculation: 50 + floor(85 * 0.3) + floor(90 / 6) = 50 + 25 + 15 = 90
-  const earnedCredits = 90;
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadedDataset, setUploadedDataset] = useState<BackendDatasetDetail | null>(null);
 
   // Validation rules for Step 1
   const isNameValid = name.trim().length >= 3 && name.trim().length <= 80;
@@ -111,9 +107,10 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
       name: file.name,
       sizeMb: +sizeMb.toFixed(2),
       type: isCsv ? 'csv' : 'xlsx',
+      rawFile: file,
     });
 
-    // Simulate progress
+    // Simulate upload selection progress
     setFileProgress(0);
     const interval = setInterval(() => {
       setFileProgress((prev) => {
@@ -123,94 +120,128 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
         }
         return prev + 25;
       });
-    }, 150);
+    }, 80);
   };
 
-  const startLiveEvaluation = () => {
+  const startLiveEvaluation = async () => {
+    // Prevent duplicate submissions while upload or evaluation is running
+    if (isUploading || isEvaluating) return;
+
+    if (!selectedFile?.rawFile) {
+      setFileError('Please select a valid CSV file before continuing.');
+      return;
+    }
+
     setCurrentStep(3);
+    setIsUploading(true);
     setIsEvaluating(true);
     setEvaluationComplete(false);
-    setEvalProgress(0);
+    setUploadError(null);
+    setUploadedDataset(null);
+    setEvalProgress(10);
     setEvalStageIndex(0);
 
     const stagesCount = 5;
     let currentIdx = 0;
-
-    const interval = setInterval(() => {
-      currentIdx += 1;
+    const progressTimer = setInterval(() => {
+      currentIdx = Math.min(currentIdx + 1, stagesCount - 1);
       setEvalStageIndex(currentIdx);
-      setEvalProgress(Math.min(100, Math.round((currentIdx / stagesCount) * 100)));
+      setEvalProgress((prev) => Math.min(85, prev + 15));
+    }, 600);
 
-      if (currentIdx >= stagesCount) {
-        clearInterval(interval);
-        setIsEvaluating(false);
-        setEvaluationComplete(true);
-      }
-    }, 500);
+    try {
+      const res = await api.datasets.upload(
+        selectedFile.rawFile,
+        category.toLowerCase(),
+        name.trim()
+      );
+
+      clearInterval(progressTimer);
+      setEvalStageIndex(5);
+      setEvalProgress(100);
+      setIsUploading(false);
+      setIsEvaluating(false);
+      setEvaluationComplete(true);
+      setUploadedDataset(res);
+    } catch (err: any) {
+      clearInterval(progressTimer);
+      setIsUploading(false);
+      setIsEvaluating(false);
+      setEvaluationComplete(false);
+      setUploadError(err?.message || 'Failed to upload dataset to the backend server.');
+    }
   };
 
   const handleFinalViewInMarketplace = () => {
+    if (!uploadedDataset) return;
+
+    const schemaEntries = Object.entries(uploadedDataset.schema_metadata || {});
+    const columns: ColumnDefinition[] = schemaEntries.map(([colName, colType]) => ({
+      name: colName,
+      type: String(colType),
+      nullCount: 0,
+      nullPct: 0,
+      distinctCount: 0,
+      synonyms: [colName],
+      description: `Column ${colName}`,
+    }));
+
+    const finalQuality = uploadedDataset.quality_score ?? 0;
+    const finalRelevance = uploadedDataset.domain_relevance_score ?? 0;
+    const finalOverall =
+      uploadedDataset.overall_score ?? (finalQuality + finalRelevance) / 2;
+    const finalCredits = uploadedDataset.credits_awarded ?? 0;
+
     const newDs: AppDataset = {
-      id: `ds-${Date.now()}`,
-      name: selectedFile ? selectedFile.name : `${name.toLowerCase().replace(/\s+/g, '_')}.csv`,
-      title: name,
-      description,
-      domain: category,
-      format: selectedFile ? selectedFile.type : 'csv',
+      id: uploadedDataset.id,
+      name: uploadedDataset.filename,
+      title: uploadedDataset.name || name,
+      description: description || uploadedDataset.content_summary,
+      domain:
+        uploadedDataset.domain.charAt(0).toUpperCase() +
+        uploadedDataset.domain.slice(1),
+      format: 'csv',
       authorId: currentUser.id,
       authorName: currentUser.name,
       cost: 20,
-      qualityScore,
-      relevanceScore,
-      overallScore,
+      qualityScore: finalQuality,
+      relevanceScore: finalRelevance,
+      overallScore: finalOverall,
       status: 'APPROVED',
-      tags: tags.length > 0 ? tags : ['telecom', 'churn'],
+      tags: tags.length > 0 ? tags : [uploadedDataset.domain.toLowerCase()],
       license,
       usageCount: 0,
       qualityBreakdown: {
-        completeness: 88,
-        validity: 92,
-        uniqueness: 84,
-        consistency: 76,
+        completeness: finalQuality,
+        validity: finalQuality,
+        uniqueness: finalQuality,
+        consistency: finalQuality,
       },
-      rowCount: 14200,
-      columnCount: 6,
-      columns: [
-        { name: 'customer_id', type: 'UUID', nullCount: 0, nullPct: 0, distinctCount: 14200, synonyms: ['id', 'user_id', 'subscriber_id'], description: 'Unique customer identifier' },
-        { name: 'tenure_months', type: 'Int64', nullCount: 12, nullPct: 0.08, distinctCount: 72, synonyms: ['tenure', 'months_active'], description: 'Months of subscription' },
-        { name: 'monthly_charges', type: 'Float64 ($)', nullCount: 0, nullPct: 0, distinctCount: 1840, synonyms: ['monthly_spend', 'bill_amount'], description: 'Monthly fee' },
-        { name: 'contract_type', type: 'Categorical', nullCount: 0, nullPct: 0, distinctCount: 3, synonyms: ['contract', 'plan_type'], description: 'Month-to-month, 1-yr, 2-yr' },
-        { name: 'total_charges', type: 'Float64 ($)', nullCount: 15, nullPct: 0.1, distinctCount: 12400, synonyms: ['lifetime_value', 'total_spend'], description: 'Total charges billed' },
-        { name: 'churn_status', type: 'Boolean', nullCount: 0, nullPct: 0, distinctCount: 2, synonyms: ['churn', 'cancelled', 'attrition'], description: 'Yes or No' },
-      ],
-      previewRows: [
-        { customer_id: 'C-90412', tenure_months: 1, monthly_charges: 29.85, contract_type: 'Month-to-month', total_charges: 29.85, churn_status: 'No' },
-        { customer_id: 'C-90413', tenure_months: 34, monthly_charges: 56.95, contract_type: 'One year', total_charges: 1889.50, churn_status: 'No' },
-        { customer_id: 'C-90414', tenure_months: 2, monthly_charges: 53.85, contract_type: 'Month-to-month', total_charges: 108.15, churn_status: 'Yes' },
-        { customer_id: 'C-90415', tenure_months: 45, monthly_charges: 42.30, contract_type: 'One year', total_charges: 1840.75, churn_status: 'No' },
-        { customer_id: 'C-90416', tenure_months: 2, monthly_charges: 70.70, contract_type: 'Month-to-month', total_charges: 151.65, churn_status: 'Yes' },
-      ],
-      createdAt: new Date().toISOString().split('T')[0],
+      rowCount: uploadedDataset.rows_count,
+      columnCount: uploadedDataset.columns_count,
+      columns,
+      previewRows: [],
+      createdAt: uploadedDataset.created_at
+        ? uploadedDataset.created_at.split('T')[0]
+        : new Date().toISOString().split('T')[0],
       currentVersion: 'v1.0',
       versionHistory: [
         {
           version: 'v1.0',
           date: new Date().toISOString().split('T')[0],
           author: currentUser.name,
-          quality: qualityScore,
-          relevance: relevanceScore,
-          changesSummary: 'Initial dataset upload with automated schema clearance.',
+          quality: finalQuality,
+          relevance: finalRelevance,
+          changesSummary:
+            uploadedDataset.content_summary ||
+            'Initial dataset upload with automated schema evaluation.',
         },
       ],
       unlockedBy: [currentUser.id],
-      sampleQueries: [
-        'Show high churn customers with monthly spend over 60',
-        'Average tenure of churned customers vs retained',
-        'Count of customers grouped by contract type'
-      ],
+      sampleQueries: [],
     };
 
-    onPublishDataset(newDs, earnedCredits);
+    onPublishDataset(newDs, finalCredits);
     onNavigate('marketplace');
   };
 
@@ -440,7 +471,7 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
             </p>
           </div>
 
-          {/* File Drop Zone (accepting ONLY CSV and XLSX up to 50 MB) */}
+          {/* File Drop Zone */}
           <label
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
@@ -461,7 +492,6 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
             <h3 className="text-sm font-semibold text-slate-800">
               Drop file here or click to browse
             </h3>
-            {/* Helper text required: CSV or XLSX, up to 50 MB */}
             <p className="text-xs text-slate-500 mt-1 font-medium">
               CSV or XLSX, up to 50 MB
             </p>
@@ -505,11 +535,20 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
 
             <button
               onClick={startLiveEvaluation}
-              disabled={!selectedFile || fileProgress < 100}
+              disabled={!selectedFile || !selectedFile.rawFile || fileProgress < 100 || isUploading}
               className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-xs transition-colors shadow-sm cursor-pointer flex items-center gap-2"
             >
-              <span>Continue to Live Evaluation</span>
-              <ArrowRight className="w-4 h-4" />
+              {isUploading ? (
+                <>
+                  <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <span>Uploading & Evaluating...</span>
+                </>
+              ) : (
+                <>
+                  <span>Continue to Live Evaluation</span>
+                  <ArrowRight className="w-4 h-4" />
+                </>
+              )}
             </button>
           </div>
         </div>
@@ -527,7 +566,7 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
             </p>
           </div>
 
-          {/* Live Evaluation Stages: Preprocessing, Relevance check, Quality check, Scoring, Credit calculation */}
+          {/* Live Evaluation Stages */}
           <div className="space-y-4">
             <div className="flex justify-between text-xs font-semibold">
               <span className="text-slate-700">Evaluation Progress</span>
@@ -543,7 +582,7 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-5 gap-2 pt-2">
               {evalStages.map((stg, idx) => {
                 const isPassed = evalStageIndex > idx || evaluationComplete;
-                const isCurrent = evalStageIndex === idx && isEvaluating;
+                const isCurrent = evalStageIndex === idx && (isEvaluating || isUploading);
 
                 return (
                   <div
@@ -566,8 +605,46 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
             </div>
           </div>
 
-          {/* Results: Three Score Gauges and Credit Breakdown Card */}
-          {evaluationComplete && (
+          {/* Backend Error State */}
+          {uploadError && (
+            <div className="space-y-4 pt-4 border-t border-slate-100">
+              <div className="p-4 bg-red-50 border border-red-200 rounded-xl space-y-2">
+                <div className="flex items-center gap-2 text-red-700 font-bold text-sm">
+                  <AlertCircle className="w-5 h-5 shrink-0" />
+                  <span>Upload & Evaluation Failed</span>
+                </div>
+                <p className="text-xs text-red-600 font-medium">
+                  {uploadError}
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUploadError(null);
+                    setCurrentStep(2);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs cursor-pointer flex items-center gap-1.5 transition-colors"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Back to File Upload</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={startLiveEvaluation}
+                  disabled={isUploading}
+                  className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs cursor-pointer flex items-center gap-1.5 transition-colors"
+                >
+                  <span>Try Again</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Results: Scores, Credit Breakdown, and Real Persisted Metadata */}
+          {evaluationComplete && uploadedDataset && (
             <div className="space-y-6 pt-4 border-t border-slate-100">
               {/* Three Score Gauges */}
               <div className="grid grid-cols-3 gap-4 text-center">
@@ -575,43 +652,129 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
                   <span className="text-xs font-medium text-slate-500 uppercase tracking-wide block mb-1">
                     Quality
                   </span>
-                  <span className="text-3xl font-black font-mono text-slate-900">{qualityScore}</span>
-                  <span className="text-[10px] text-slate-400 block mt-1">out of 100</span>
+                  <span className="text-3xl font-black font-mono text-slate-900">
+                    {uploadedDataset.quality_score !== undefined
+                      ? uploadedDataset.quality_score
+                      : '—'}
+                  </span>
+                  <span className="text-[10px] text-slate-400 block mt-1">
+                    {uploadedDataset.quality_score !== undefined
+                      ? 'out of 100'
+                      : 'Evaluation pending'}
+                  </span>
                 </div>
 
                 <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
                   <span className="text-xs font-medium text-slate-500 uppercase tracking-wide block mb-1">
                     Relevance
                   </span>
-                  <span className="text-3xl font-black font-mono text-slate-900">{relevanceScore}</span>
-                  <span className="text-[10px] text-slate-400 block mt-1">out of 100</span>
+                  <span className="text-3xl font-black font-mono text-slate-900">
+                    {uploadedDataset.domain_relevance_score !== undefined
+                      ? uploadedDataset.domain_relevance_score
+                      : '—'}
+                  </span>
+                  <span className="text-[10px] text-slate-400 block mt-1">
+                    {uploadedDataset.domain_relevance_score !== undefined
+                      ? 'out of 100'
+                      : 'Evaluation pending'}
+                  </span>
                 </div>
 
                 <div className="p-4 rounded-xl bg-indigo-50 border border-indigo-200">
                   <span className="text-xs font-medium text-indigo-700 uppercase tracking-wide block mb-1">
                     Overall
                   </span>
-                  <span className="text-3xl font-black font-mono text-indigo-700">{overallScore}</span>
-                  <span className="text-[10px] text-indigo-500 block mt-1">(Qual + Rel) / 2</span>
+                  <span className="text-3xl font-black font-mono text-indigo-700">
+                    {uploadedDataset.overall_score !== undefined
+                      ? uploadedDataset.overall_score
+                      : '—'}
+                  </span>
+                  <span className="text-[10px] text-indigo-500 block mt-1">
+                    {uploadedDataset.overall_score !== undefined
+                      ? 'Composite Score'
+                      : 'Evaluation pending'}
+                  </span>
                 </div>
               </div>
 
-              {/* Exact Credit Breakdown Card: "Basic +50, Quality bonus +25, Relevance bonus +15 = 90 credits" */}
+              {/* Reward Breakdown Card */}
               <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 space-y-2">
                 <span className="text-xs font-semibold text-emerald-800 uppercase tracking-wider block">
                   Reward Breakdown
                 </span>
                 <div className="text-lg sm:text-xl font-bold font-mono text-emerald-700">
-                  Basic +50, Quality bonus +25, Relevance bonus +15 = 90 credits
+                  {uploadedDataset.credits_awarded !== undefined
+                    ? `+${uploadedDataset.credits_awarded} credits awarded`
+                    : 'Dataset verified and registered successfully'}
                 </div>
                 <p className="text-xs text-emerald-600">
                   Published datasets are indexed for instant plain English queries. You will also earn +20 credits each time another user unlocks this dataset.
                 </p>
               </div>
 
+              {/* Actual Backend Dataset Information */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 border-b border-slate-200 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    <span className="text-xs font-bold text-slate-900 uppercase tracking-wide">
+                      Persisted Dataset Details
+                    </span>
+                  </div>
+                  <span className="font-mono text-xs px-2.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200 font-semibold self-start sm:self-auto">
+                    ID: {uploadedDataset.id}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                  <div>
+                    <span className="text-slate-400 block text-[11px]">Filename</span>
+                    <span className="font-semibold text-slate-800 break-all">{uploadedDataset.filename}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[11px]">Domain</span>
+                    <span className="font-semibold text-slate-800 capitalize">{uploadedDataset.domain}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[11px]">Rows Count</span>
+                    <span className="font-mono font-bold text-slate-800">{uploadedDataset.rows_count.toLocaleString()}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[11px]">Columns Count</span>
+                    <span className="font-mono font-bold text-slate-800">{uploadedDataset.columns_count}</span>
+                  </div>
+                </div>
+
+                {uploadedDataset.content_summary && (
+                  <p className="text-xs text-slate-600 pt-1 border-t border-slate-100">
+                    {uploadedDataset.content_summary}
+                  </p>
+                )}
+
+                {uploadedDataset.schema_metadata && Object.keys(uploadedDataset.schema_metadata).length > 0 && (
+                  <div className="pt-2 border-t border-slate-100">
+                    <span className="text-[11px] font-semibold text-slate-500 block mb-1.5">
+                      Detected Schema Columns ({uploadedDataset.columns_count}):
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {Object.entries(uploadedDataset.schema_metadata).map(([col, typ]) => (
+                        <span
+                          key={col}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono bg-white border border-slate-200 text-slate-700"
+                        >
+                          <span className="font-semibold">{col}</span>
+                          <span className="text-slate-400 text-[10px]">({String(typ)})</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Button: "View in marketplace" */}
               <div className="flex justify-end pt-2">
                 <button
+                  type="button"
                   onClick={handleFinalViewInMarketplace}
                   className="px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm cursor-pointer flex items-center gap-2 transition-colors"
                 >

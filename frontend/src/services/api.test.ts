@@ -171,3 +171,138 @@ describe('Live Backend Authentication Integration', () => {
     expect(me.email).toBe('demo@datapulse.io');
   });
 });
+
+describe('Live Backend Dataset Upload Integration', () => {
+  let authToken: string;
+
+  beforeEach(async () => {
+    // Log in with demo-user to obtain a valid Bearer token for authenticated tests
+    const res = await api.auth.demoLogin('demo-user');
+    authToken = res.access_token;
+    setStoredToken(authToken);
+  });
+
+  it('rejects unauthenticated upload requests with 401 Unauthorized', async () => {
+    clearStoredToken();
+
+    const sampleCsv = 'id,name,value\n1,alpha,10.5\n2,beta,20.0';
+    const file = new File([sampleCsv], 'unauth_test.csv', { type: 'text/csv' });
+
+    try {
+      await api.datasets.upload(file, 'general', 'Unauth Test');
+      expect(true).toBe(false); // Should not succeed
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(401);
+      expect(err.message).toBeDefined();
+    }
+  });
+
+  it('rejects non-CSV file extensions with 400 Bad Request', async () => {
+    const jsonContent = JSON.stringify([{ id: 1, name: 'invalid' }]);
+    const file = new File([jsonContent], 'invalid.json', { type: 'application/json' });
+
+    try {
+      await api.datasets.upload(file, 'technology', 'Invalid Ext Test');
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(400);
+      expect(err.message).toContain('Only CSV files');
+    }
+  });
+
+  it('rejects empty CSV content with 422 Unprocessable Entity', async () => {
+    const file = new File([''], 'empty.csv', { type: 'text/csv' });
+
+    try {
+      await api.datasets.upload(file, 'general', 'Empty Test');
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(422);
+      expect(err.message).toContain('empty');
+    }
+  });
+
+  it('rejects CSV with header only and zero data rows with 422', async () => {
+    const file = new File(['col1,col2,col3\n'], 'header_only.csv', { type: 'text/csv' });
+
+    try {
+      await api.datasets.upload(file, 'general', 'Header Only Test');
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(422);
+      expect(err.message).toContain('at least one data row');
+    }
+  });
+
+  it('successfully uploads valid CSV, returns real dataset details and awards credits', async () => {
+    const csvData = [
+      'customer_id,tenure_months,monthly_charges,churn',
+      'C-101,12,65.50,No',
+      'C-102,24,80.00,No',
+      'C-103,3,45.20,Yes',
+      'C-104,36,95.10,No',
+      'C-105,8,72.40,Yes',
+    ].join('\n');
+
+    const fileName = `telecom_churn_${Date.now()}.csv`;
+    const datasetTitle = 'Telecom Customer Churn Verified';
+    const file = new File([csvData], fileName, { type: 'text/csv' });
+
+    const result = await api.datasets.upload(file, 'telecom', datasetTitle);
+
+    expect(result).toBeDefined();
+    expect(result.id).toBeDefined();
+    expect(result.id.startsWith('ds_')).toBe(true);
+    expect(result.name).toBe(datasetTitle);
+    expect(result.filename).toBe(fileName);
+    expect(result.domain).toBe('telecom');
+    expect(result.rows_count).toBe(5);
+    expect(result.columns_count).toBe(4);
+    expect(result.schema_metadata).toBeDefined();
+    expect(result.schema_metadata['customer_id']).toBe('string');
+    expect(result.content_summary).toContain('5 rows');
+    expect(result.content_summary).toContain('4 columns');
+
+    // Evaluation scores and credits should be provided
+    expect(result.quality_score).toBeDefined();
+    expect(result.quality_score).toBeGreaterThan(0);
+    expect(result.credits_awarded).toBeDefined();
+    expect(result.credits_awarded).toBeGreaterThanOrEqual(50);
+
+    // Verify retrieval via getDataset
+    const fetched = await api.datasets.getDataset(result.id);
+    expect(fetched.id).toBe(result.id);
+    expect(fetched.rows_count).toBe(5);
+
+    // Verify retrieval via getEvaluation
+    const evalReport = await api.datasets.getEvaluation(result.id);
+    expect(evalReport.dataset_id).toBe(result.id);
+    expect(evalReport.status).toBe('completed');
+    expect(evalReport.credits_awarded).toBe(result.credits_awarded!);
+  });
+
+  it('supports upload using FormData directly with automatic filename fallback for name', async () => {
+    const csvContent = 'sku,price,stock\nA101,19.99,100\nB202,29.99,50\nC303,9.99,250';
+    const fileName = `inventory_test_${Date.now()}.csv`;
+    const file = new File([csvContent], fileName, { type: 'text/csv' });
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('domain', 'retail');
+    // omit name field so backend derives name from filename
+
+    const result = await api.datasets.upload(formData);
+
+    expect(result).toBeDefined();
+    expect(result.id.startsWith('ds_')).toBe(true);
+    expect(result.domain).toBe('retail');
+    expect(result.filename).toBe(fileName);
+    expect(result.name).toBe(fileName.replace('.csv', ''));
+    expect(result.rows_count).toBe(3);
+    expect(result.columns_count).toBe(3);
+  });
+});

@@ -353,6 +353,22 @@ export default function App() {
       `Dataset approved! You earned +${earnedCredits} credits.`,
       'emerald'
     );
+
+    if (isAuthenticated) {
+      api.auth.getMe().then((me) => {
+        setUsers((prev) => {
+          const u = prev[me.id];
+          if (!u) return prev;
+          return {
+            ...prev,
+            [me.id]: {
+              ...u,
+              credits: me.credits,
+            },
+          };
+        });
+      }).catch(() => {});
+    }
   };
 
   // Query Execution & Unlock Charge Logic

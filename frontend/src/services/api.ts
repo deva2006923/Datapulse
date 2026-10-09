@@ -1,5 +1,7 @@
 import {
   AuthTokenResponse,
+  BackendDatasetDetail,
+  BackendEvaluationResponse,
   BackendUserResponse,
   UserLoginRequest,
   UserRegisterRequest,
@@ -241,6 +243,96 @@ export const api = {
         }
         throw err;
       }
+    },
+  },
+
+  datasets: {
+    /**
+     * Uploads a CSV dataset file to POST /datasets/upload using multipart/form-data.
+     * Multipart fields expected by backend:
+     * - file: File (.csv)
+     * - domain: string (optional, defaults to "general")
+     * - name: string (optional, defaults to filename without extension)
+     */
+    async upload(
+      fileOrFormData: File | FormData,
+      domain: string = 'general',
+      name?: string
+    ): Promise<BackendDatasetDetail> {
+      let body: FormData;
+      if (fileOrFormData instanceof FormData) {
+        body = fileOrFormData;
+      } else {
+        body = new FormData();
+        body.append('file', fileOrFormData);
+        if (domain) {
+          body.append('domain', domain);
+        }
+        if (name) {
+          body.append('name', name);
+        }
+      }
+
+      const rawRes = await request<BackendDatasetDetail>('/datasets/upload', {
+        method: 'POST',
+        body,
+      });
+
+      const schema = rawRes?.schema_metadata || rawRes?.schema_json || {};
+      const res: BackendDatasetDetail = {
+        ...rawRes,
+        schema_metadata: schema,
+        schema_json: schema,
+      };
+
+      // If the upload response already provides evaluation metrics, return as-is
+      if (res && res.id) {
+        if (res.quality_score !== undefined && res.credits_awarded !== undefined) {
+          return res;
+        }
+
+        // Check if evaluation was completed synchronously on backend
+        try {
+          const evalRes = await api.datasets.getEvaluation(res.id);
+          if (evalRes) {
+            return {
+              ...res,
+              quality_score: evalRes.quality_score,
+              domain_relevance_score: evalRes.domain_relevance_score,
+              overall_score: evalRes.overall_score,
+              credits_awarded: evalRes.credits_awarded,
+            };
+          }
+        } catch {
+          // If evaluation is not yet ready or failed, return raw upload response
+        }
+      }
+
+      return res;
+    },
+
+    /**
+     * Retrieves the evaluation report for a given dataset ID.
+     */
+    async getEvaluation(datasetId: string): Promise<BackendEvaluationResponse> {
+      return request<BackendEvaluationResponse>(`/datasets/${datasetId}/evaluation`, {
+        method: 'GET',
+      });
+    },
+
+    /**
+     * Retrieves dataset details by ID.
+     */
+    async getDataset(datasetId: string): Promise<BackendDatasetDetail> {
+      const data = await request<BackendDatasetDetail>(`/datasets/${datasetId}`, {
+        method: 'GET',
+      });
+      const schema = data?.schema_metadata || data?.schema_json || {};
+      return {
+        ...data,
+        schema_metadata: schema,
+        schema_json: schema,
+      };
     },
   },
 };

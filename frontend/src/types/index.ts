@@ -39,6 +39,40 @@ export interface AuthTokenResponse {
   user: BackendUserResponse;
 }
 
+export interface BackendDatasetDetail {
+  id: string;
+  user_id: string;
+  name: string;
+  filename: string;
+  domain: string;
+  rows_count: number;
+  columns_count: number;
+  schema_metadata?: Record<string, string>;
+  schema_json?: Record<string, string>;
+  content_summary: string;
+  created_at: string;
+  quality_score?: number;
+  domain_relevance_score?: number;
+  overall_score?: number;
+  credits_awarded?: number;
+}
+
+export interface BackendEvaluationResponse {
+  id: string;
+  dataset_id: string;
+  status: string;
+  progress: number;
+  quality_score: number;
+  schema_fidelity_score: number;
+  completeness_score: number;
+  domain_relevance_score: number;
+  overall_score: number;
+  credits_awarded: number;
+  error_message?: string | null;
+  updated_at: string;
+  created_at: string;
+}
+
 export interface UserRegisterRequest {
   email: string;
   password: string;
