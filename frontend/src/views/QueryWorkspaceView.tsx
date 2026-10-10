@@ -16,6 +16,8 @@ import {
   ChevronUp,
   Info,
   CheckCircle2,
+  Database,
+  Layers,
 } from 'lucide-react';
 import { AppDataset, UserAccount, QueryHistoryItem } from '../types';
 
@@ -34,9 +36,12 @@ interface QueryWorkspaceViewProps {
       executionMs: number;
       chargedCredits: number;
       explanation: string;
+      recordsAnalyzed?: number;
+      matchingDatasets?: string[];
+      columns?: string[];
     }) => void,
     onError: (err: {
-      type: 'SQL_REJECTED' | 'INSUFFICIENT_CREDITS';
+      type: string;
       message: string;
       shortfall?: number;
     }) => void
@@ -56,10 +61,14 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
   const activeDataset =
     datasets.find((d) => d.id === selectedDatasetId) || datasets[0] || null;
 
-  const [prompt, setPrompt] = useState(initialPrompt || (activeDataset?.sampleQueries[0] || ''));
+  const [prompt, setPrompt] = useState(
+    initialPrompt || activeDataset?.sampleQueries?.[0] || ''
+  );
   const [generatedSql, setGeneratedSql] = useState<string>('');
   const [results, setResults] = useState<Record<string, any>[] | null>(null);
   const [columns, setColumns] = useState<string[]>([]);
+  const [recordsAnalyzed, setRecordsAnalyzed] = useState<number | null>(null);
+  const [matchingDatasets, setMatchingDatasets] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<'table' | 'chart'>('table');
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionTime, setExecutionTime] = useState<number | null>(null);
@@ -68,7 +77,7 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
   const [queryExplanation, setQueryExplanation] = useState<string>('');
   const [lastChargedCredits, setLastChargedCredits] = useState<number | null>(null);
   const [errorBanner, setErrorBanner] = useState<{
-    type: 'SQL_REJECTED' | 'INSUFFICIENT_CREDITS';
+    type: string;
     message: string;
     shortfall?: number;
   } | null>(null);
@@ -84,16 +93,16 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
   if (!activeDataset) {
     return (
       <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">
-        No dataset available. Please upload or select a dataset.
+        No dataset available in the catalog. Please upload or contribute a dataset.
       </div>
     );
   }
 
   const isOwner = activeDataset.authorId === currentUser.id;
   const isUnlocked = isOwner || activeDataset.unlockedBy.includes(currentUser.id);
-  const unlockCost = activeDataset.cost || 20;
-  const isShortfall = !isUnlocked && currentUser.credits < unlockCost;
-  const shortfallAmount = isShortfall ? unlockCost - currentUser.credits : 0;
+  const queryCost = isOwner ? 0 : 1;
+  const isShortfall = !isOwner && currentUser.credits < queryCost;
+  const shortfallAmount = isShortfall ? queryCost - currentUser.credits : 0;
 
   const handleCopySql = () => {
     if (!generatedSql) return;
@@ -117,8 +126,15 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
         setExecutionTime(res.executionMs);
         setLastChargedCredits(res.chargedCredits);
         setQueryExplanation(res.explanation);
-        if (res.rows.length > 0) {
+        setRecordsAnalyzed(res.recordsAnalyzed ?? null);
+        setMatchingDatasets(res.matchingDatasets || []);
+
+        if (res.columns && res.columns.length > 0) {
+          setColumns(res.columns);
+        } else if (res.rows.length > 0) {
           setColumns(Object.keys(res.rows[0]));
+        } else {
+          setColumns([]);
         }
       },
       (err) => {
@@ -131,13 +147,18 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
   const handleExportCsv = () => {
     if (!results || results.length === 0) return;
     const headers = columns.join(',');
-    const rows = results.map((r) => columns.map((col) => JSON.stringify(r[col] ?? '')).join(','));
+    const rows = results.map((r) =>
+      columns.map((col) => JSON.stringify(r[col] ?? '')).join(',')
+    );
     const csvContent = [headers, ...rows].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `${activeDataset.name.replace(/\.[^/.]+$/, '')}_query_results.csv`);
+    link.setAttribute(
+      'download',
+      `${activeDataset.name.replace(/\.[^/.]+$/, '')}_query_results.csv`
+    );
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -156,7 +177,7 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
               Query Workspace
             </h1>
             <p className="text-xs text-slate-500 mt-0.5">
-              Ask questions in plain English. Queries are converted to read-only sandboxed SQL.
+              Ask questions in plain English. Queries are converted to read-only sandboxed SQL executed on DuckDB.
             </p>
           </div>
 
@@ -170,11 +191,13 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
               onChange={(e) => onSelectDataset(e.target.value)}
               className="bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-semibold text-slate-800 outline-none focus:border-indigo-500 max-w-xs truncate"
             >
-              {datasets.filter((d) => d.status !== 'REJECTED').map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.title} ({d.format.toUpperCase()})
-                </option>
-              ))}
+              {datasets
+                .filter((d) => d.status !== 'REJECTED')
+                .map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.title} ({d.format.toUpperCase()})
+                  </option>
+                ))}
             </select>
           </div>
         </div>
@@ -184,7 +207,9 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
           <div className="flex items-center gap-2">
             <span className="font-semibold text-slate-700">{activeDataset.title}</span>
             <span className="text-slate-400">•</span>
-            <span className="font-mono text-slate-500">{activeDataset.rowCount.toLocaleString()} rows</span>
+            <span className="font-mono text-slate-500">
+              {activeDataset.rowCount.toLocaleString()} rows
+            </span>
             <span className="text-slate-400">•</span>
             {isOwner ? (
               <span className="text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded font-semibold">
@@ -192,36 +217,38 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
               </span>
             ) : isUnlocked ? (
               <span className="text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded font-semibold flex items-center gap-1">
-                <Unlock className="w-3 h-3" /> Unlocked
+                <Unlock className="w-3 h-3" /> Standard Access (1 cr)
               </span>
             ) : (
               <span className="text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded font-semibold flex items-center gap-1">
-                <Lock className="w-3 h-3" /> {unlockCost} cr unlock
+                <Lock className="w-3 h-3" /> {queryCost} cr per query
               </span>
             )}
           </div>
 
           <div className="flex items-center gap-2 text-slate-600">
             <span>Credit balance:</span>
-            <span className="font-mono font-bold text-emerald-600">{currentUser.credits} cr</span>
+            <span className="font-mono font-bold text-emerald-600">
+              {currentUser.credits} cr
+            </span>
           </div>
         </div>
       </div>
 
-      {/* Notice for Unlocked vs Locked Datasets (Required in Item 9) */}
-      {!isUnlocked && (
-        <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 shadow-xs flex items-start gap-3">
-          <Info className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
-          <div className="text-xs text-amber-900 space-y-1">
+      {/* Notice for Locked vs Owner Datasets */}
+      {!isOwner && (
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 shadow-xs flex items-start gap-3">
+          <Info className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
+          <div className="text-xs text-slate-800 space-y-1">
             <span className="font-bold block">
-              Running this query will unlock the dataset for {unlockCost} credits. Balance: {currentUser.credits}
+              Marketplace Policy: Each paid query costs {queryCost} credit. Balance: {currentUser.credits} cr.
             </span>
-            <p className="text-amber-800">
-              You are charged once only after your query executes successfully. The original contributor will earn +20 credits.
+            <p className="text-slate-600">
+              Credits are deducted only upon successful execution. The dataset contributor receives 1 credit royalty reward.
             </p>
             {isShortfall && (
               <p className="text-red-700 font-bold pt-1">
-                Shortfall: You need {shortfallAmount} more credits to unlock this dataset (Required: {unlockCost}, Balance: {currentUser.credits}). Run button is disabled.
+                Shortfall: You need {shortfallAmount} more credit(s) to execute queries on this dataset (Required: {queryCost}, Balance: {currentUser.credits}). Run button is disabled.
               </p>
             )}
           </div>
@@ -240,7 +267,7 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && !isShortfall && handleRun()}
-              placeholder='e.g. "Show top 10 patients by cholesterol" or "Show high churn customers with monthly spend over 60"'
+              placeholder='e.g. "how many rows in this dataset", "show top 10 rows", or "what items are listed"'
               className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-4 pr-32 py-3 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-500 shadow-xs"
             />
             <button
@@ -275,11 +302,11 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
               "{q}"
             </button>
           ))}
-          {/* Test forbidden mutation */}
+          {/* Test mutation rejection */}
           <button
-            onClick={() => setPrompt('DROP TABLE customers CASCADE;')}
+            onClick={() => setPrompt('DROP TABLE customers;')}
             className="text-[11px] px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition-colors cursor-pointer"
-            title="Tests safety policy: SQL_REJECTED"
+            title="Tests safety policy: SQL_SECURITY_ERROR"
           >
             "DROP TABLE customers;" (Test Rejection)
           </button>
@@ -303,44 +330,70 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
             <p className="text-xs leading-relaxed">{errorBanner.message}</p>
             {errorBanner.shortfall !== undefined && (
               <p className="text-xs font-semibold mt-1">
-                Shortfall: You need <span className="font-mono text-red-700">{errorBanner.shortfall} more credits</span> to unlock this dataset.
+                Shortfall: You need{' '}
+                <span className="font-mono text-red-700">
+                  {errorBanner.shortfall} more credits
+                </span>{' '}
+                to execute queries.
               </p>
             )}
             <p className="text-[11px] text-slate-500 mt-1">
-              No credits have been charged for this request.
+              No credits were deducted for this request.
             </p>
           </div>
         </div>
       )}
 
-      {/* Post-Query Status: Credits Charged / New Balance Banner (Required in Item 9) */}
-      {results && lastChargedCredits !== null && (
+      {/* Post-Query Status: Credits Charged & Authoritative Balance Banner */}
+      {results !== null && lastChargedCredits !== null && (
         <div className="p-4 rounded-xl bg-indigo-50 border border-indigo-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-indigo-900 shadow-xs">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
             <span className="font-semibold">
-              Query succeeded. Credits charged: <strong className="font-mono">{lastChargedCredits} credits</strong> • New balance: <strong className="font-mono text-emerald-700">{currentUser.credits} credits</strong>
+              Query succeeded.{' '}
+              {lastChargedCredits === 0 ? (
+                <>Credits charged: <strong className="font-mono text-emerald-700">0 credits (Free own-dataset access)</strong></>
+              ) : (
+                <>Credits charged: <strong className="font-mono">{lastChargedCredits} credits</strong></>
+              )}{' '}
+              • Current balance: <strong className="font-mono text-emerald-700">{currentUser.credits} credits</strong>
             </span>
           </div>
           {lastChargedCredits > 0 && (
             <span className="text-emerald-700 bg-emerald-100/70 border border-emerald-300 px-2 py-0.5 rounded font-mono font-bold self-start sm:self-auto">
-              Unlocked & Royalty Dispatched (+20 to author)
+              Marketplace Fee Charged & Contributor Rewarded
             </span>
           )}
         </div>
       )}
 
-      {/* Query Explanation (Required in Item 9) */}
-      {results && queryExplanation && (
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm text-xs space-y-1">
-          <span className="font-bold text-slate-700 uppercase tracking-wide text-[11px] block">
-            Query Explanation
-          </span>
-          <p className="text-slate-600 leading-relaxed">{queryExplanation}</p>
+      {/* Query Explanation / Answer & Metadata (Records Analyzed, Matching Datasets) */}
+      {results !== null && (queryExplanation || recordsAnalyzed !== null) && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2">
+            <span className="font-bold text-slate-700 uppercase tracking-wide text-[11px] block">
+              AI Answer & Synthesis
+            </span>
+            <div className="flex items-center gap-2">
+              {recordsAnalyzed !== null && (
+                <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-100 text-slate-700 border border-slate-200">
+                  {recordsAnalyzed} records analyzed
+                </span>
+              )}
+              {matchingDatasets.length > 0 && (
+                <span className="px-2 py-0.5 rounded text-[11px] bg-indigo-50 text-indigo-700 border border-indigo-200 font-medium">
+                  Source: {matchingDatasets.join(', ')}
+                </span>
+              )}
+            </div>
+          </div>
+          <p className="text-sm text-slate-800 leading-relaxed font-medium">
+            {queryExplanation}
+          </p>
         </div>
       )}
 
-      {/* Collapsible "View generated SQL" with Copy Button (Required in Item 9) */}
+      {/* Collapsible "View generated SQL" with Copy Button */}
       {generatedSql && (
         <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
           <div
@@ -476,26 +529,38 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
           ) : (
             /* Bar Chart View */
             <div className="p-6 space-y-4">
-              <div className="text-xs text-slate-500 font-medium">
-                Distribution breakdown across numeric attributes:
-              </div>
+              <span className="text-xs text-slate-500 block">
+                Visualizing top records from analytical query output.
+              </span>
               <div className="space-y-3">
                 {results.slice(0, 8).map((row, idx) => {
-                  const label = String(row[columns[0]] || `Row ${idx + 1}`);
-                  const numCol = columns.find((c) => typeof row[c] === 'number') || columns[1];
-                  const val = typeof row[numCol] === 'number' ? row[numCol] : 50;
-                  const maxVal = Math.max(...results.map((r) => (typeof r[numCol] === 'number' ? r[numCol] : 50))) || 100;
-                  const pct = Math.min(100, Math.max(10, Math.round((val / maxVal) * 100)));
+                  const labelKey = columns[0] || 'id';
+                  const valKey = columns.find(
+                    (c) => typeof row[c] === 'number'
+                  ) || columns[1] || columns[0];
+                  const label = String(row[labelKey] ?? `Item ${idx + 1}`);
+                  const val = Number(row[valKey]) || (idx + 1) * 10;
+                  const maxRowVal = Math.max(
+                    ...results.map((r) => Number(r[valKey]) || 1)
+                  );
+                  const pct = Math.min(
+                    100,
+                    Math.round((val / (maxRowVal || 1)) * 100)
+                  );
 
                   return (
                     <div key={idx} className="space-y-1">
                       <div className="flex justify-between text-xs">
-                        <span className="font-mono text-slate-700">{label}</span>
-                        <span className="font-mono font-semibold text-slate-900">{val}</span>
+                        <span className="font-semibold text-slate-700 truncate max-w-xs">
+                          {label}
+                        </span>
+                        <span className="font-mono text-indigo-700 font-bold">
+                          {val.toLocaleString()}
+                        </span>
                       </div>
-                      <div className="w-full bg-slate-100 rounded-full h-3">
+                      <div className="w-full bg-slate-100 rounded-full h-2">
                         <div
-                          className="bg-indigo-600 h-3 rounded-full"
+                          className="bg-indigo-600 h-2 rounded-full"
                           style={{ width: `${pct}%` }}
                         />
                       </div>
@@ -508,51 +573,17 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
         </div>
       )}
 
-      {/* Session History */}
-      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-            Workspace Session History
-          </h3>
-          <span className="text-[11px] text-slate-400">
-            {sessionHistory.length} queries this session
+      {/* Empty Result Rendering */}
+      {results !== null && results.length === 0 && (
+        <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500 shadow-sm space-y-1">
+          <span className="font-bold text-slate-700 block text-xs">
+            0 records returned
           </span>
+          <p className="text-xs">
+            The query was processed successfully, but returned no matching data rows from this dataset.
+          </p>
         </div>
-
-        {sessionHistory.length === 0 ? (
-          <p className="text-xs text-slate-400 italic">No queries run in this session yet.</p>
-        ) : (
-          <div className="divide-y divide-slate-100">
-            {sessionHistory.slice(0, 5).map((q) => (
-              <div key={q.id} className="py-2.5 flex items-center justify-between gap-4 text-xs">
-                <div className="space-y-0.5 truncate">
-                  <div className="font-medium text-slate-800 truncate">"{q.naturalPrompt}"</div>
-                  <div className="text-[11px] text-slate-400 font-mono truncate">
-                    {q.datasetName} • {q.timestamp}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                      q.status === 'SUCCESS'
-                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                        : q.status === 'SQL_REJECTED'
-                        ? 'bg-red-50 text-red-700 border border-red-200'
-                        : 'bg-amber-50 text-amber-700 border border-amber-200'
-                    }`}
-                  >
-                    {q.status}
-                  </span>
-                  <span className="font-mono text-slate-500">
-                    {q.creditsCharged > 0 ? `-${q.creditsCharged} cr` : '0 cr'}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 };

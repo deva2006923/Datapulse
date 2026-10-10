@@ -1,33 +1,38 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Search,
-  Filter,
   Lock,
   Unlock,
-  CheckCircle2,
-  ArrowRight,
-  Database,
-  SlidersHorizontal,
   Coins,
   ShieldCheck,
-  Tag,
+  AlertCircle,
+  RefreshCw,
+  Loader2,
 } from 'lucide-react';
 import { AppDataset, UserAccount, PageRoute } from '../types';
+import { api, ApiError } from '../services/api';
+import {
+  backendDatasetToAppDataset,
+  searchItemToAppDataset,
+} from '../services/datasetAdapter';
 
 interface MarketplaceViewProps {
-  datasets: AppDataset[];
+  datasets?: AppDataset[];
   currentUser: UserAccount;
   onSelectDatasetForDetail: (datasetId: string) => void;
   onNavigate: (route: PageRoute) => void;
+  onDatasetsLoaded?: (datasets: AppDataset[]) => void;
 }
 
 export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
-  datasets,
+  datasets: propDatasets = [],
   currentUser,
   onSelectDatasetForDetail,
   onNavigate,
+  onDatasetsLoaded,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
+  const [activeQuery, setActiveQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [minQuality, setMinQuality] = useState<number>(0);
   const [maxCost, setMaxCost] = useState<number>(50);
@@ -36,70 +41,99 @@ export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 4;
 
-  // Exact prompt requirement:
-  // Searching "I need a dataset for predicting customer churn" must rank:
-  // Telecom Customer Churn 96%, Customer Retention Dataset 91%, Bank Customer Churn 87%, and hide matches below 10%.
-  const calculateMatchPct = (ds: AppDataset, query: string): number | null => {
-    if (!query.trim()) return null;
-    const q = query.toLowerCase().trim();
+  const [realDatasets, setRealDatasets] = useState<AppDataset[]>(propDatasets);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    if (
-      q.includes('customer churn') ||
-      q.includes('predicting customer churn') ||
-      q.includes('churn')
-    ) {
-      if (ds.id === 'ds-telecom-churn' || ds.title.toLowerCase().includes('telecom customer churn')) {
-        return 96;
+  const fetchDatasets = useCallback(
+    async (queryText: string, category: string) => {
+      setIsLoading(true);
+      setErrorMessage(null);
+
+      try {
+        const domainParam = category !== 'All' ? category.toLowerCase() : undefined;
+
+        if (queryText.trim().length > 0) {
+          // POST /datasets/search
+          const searchRes = await api.datasets.search(queryText.trim(), domainParam);
+          const mapped = searchRes.results.map((item) =>
+            searchItemToAppDataset(item, currentUser.id)
+          );
+          setRealDatasets(mapped);
+          setActiveQuery(queryText.trim());
+          if (onDatasetsLoaded) {
+            onDatasetsLoaded(mapped);
+          }
+        } else {
+          // GET /datasets?domain=...
+          const listRes = await api.datasets.list(domainParam);
+          const mapped = listRes.datasets.map((item) =>
+            backendDatasetToAppDataset(item, currentUser.id)
+          );
+          setRealDatasets(mapped);
+          setActiveQuery('');
+          if (onDatasetsLoaded) {
+            onDatasetsLoaded(mapped);
+          }
+        }
+      } catch (err: any) {
+        const message =
+          err instanceof ApiError
+            ? err.message
+            : 'Unable to retrieve datasets from backend server. Please check your network connection.';
+        setErrorMessage(message);
+      } finally {
+        setIsLoading(false);
       }
-      if (ds.id === 'ds-customer-retention' || ds.title.toLowerCase().includes('customer retention')) {
-        return 91;
-      }
-      if (ds.id === 'ds-bank-churn' || ds.title.toLowerCase().includes('bank customer churn')) {
-        return 87;
-      }
-      // Any other datasets have 0% match and will be hidden (< 10%)
-      return 0;
+    },
+    [currentUser.id, onDatasetsLoaded]
+  );
+
+  // Initial fetch and on category filter change
+  useEffect(() => {
+    fetchDatasets(searchQuery, selectedCategory);
+  }, [selectedCategory]);
+
+  // Handle Search Input Change with Debounce (400ms)
+  const handleSearchInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setSearchQuery(val);
+    setCurrentPage(1);
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
     }
 
-    // General search matching
-    let score = 0;
-    if (ds.title.toLowerCase().includes(q)) {
-      score = 96;
-    } else if (ds.tags?.some((t) => t.toLowerCase().includes(q))) {
-      score = 92;
-    } else if (ds.columns?.some((c) => c.name.toLowerCase().includes(q) || c.synonyms.some((s) => s.toLowerCase().includes(q)))) {
-      score = 88;
-    } else if (ds.description.toLowerCase().includes(q)) {
-      score = 82;
-    } else if (ds.domain.toLowerCase().includes(q)) {
-      score = 75;
-    } else {
-      const words = q.split(/\s+/).filter((w) => w.length > 2);
-      const matches = words.filter((w) =>
-        ds.title.toLowerCase().includes(w) ||
-        ds.description.toLowerCase().includes(w) ||
-        ds.tags?.some((t) => t.toLowerCase().includes(w))
-      );
-      if (matches.length > 0) {
-        score = Math.round((matches.length / words.length) * 85);
-      }
-    }
-
-    return score;
+    debounceTimerRef.current = setTimeout(() => {
+      fetchDatasets(val, selectedCategory);
+    }, 350);
   };
 
-  // Filter datasets (approved catalog only in public marketplace)
-  const filtered = datasets
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    fetchDatasets(searchQuery, selectedCategory);
+  };
+
+  const handleClearSearch = () => {
+    setSearchQuery('');
+    setActiveQuery('');
+    setCurrentPage(1);
+    fetchDatasets('', selectedCategory);
+  };
+
+  // Filter datasets (approved catalog, min quality slider, max cost slider, license)
+  const filtered = realDatasets
     .filter((ds) => ds.status !== 'REJECTED')
     .filter((ds) => {
-      const matchPct = calculateMatchPct(ds, searchQuery);
-      // Hide matches below 10% when searching
-      if (searchQuery.trim() !== '') {
-        if (matchPct === null || matchPct < 10) return false;
-      }
-
-      // Category filter
-      if (selectedCategory !== 'All' && ds.domain !== selectedCategory) {
+      // Category filter (if backend didn't already filter or for hybrid verification)
+      if (
+        selectedCategory !== 'All' &&
+        ds.domain.toLowerCase() !== selectedCategory.toLowerCase()
+      ) {
         return false;
       }
 
@@ -122,21 +156,23 @@ export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
     })
     .sort((a, b) => {
       if (sortBy === 'match') {
-        if (searchQuery.trim()) {
-          const matchA = calculateMatchPct(a, searchQuery) || 0;
-          const matchB = calculateMatchPct(b, searchQuery) || 0;
-          return matchB - matchA;
+        if (activeQuery) {
+          return (b.matchScore ?? 0) - (a.matchScore ?? 0);
         }
         return b.overallScore - a.overallScore;
       }
       if (sortBy === 'quality') return b.qualityScore - a.qualityScore;
-      if (sortBy === 'newest') return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      if (sortBy === 'newest')
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
       if (sortBy === 'usage') return (b.usageCount || 0) - (a.usageCount || 0);
       return 0;
     });
 
   const totalPages = Math.ceil(filtered.length / itemsPerPage) || 1;
-  const paginated = filtered.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+  const paginated = filtered.slice(
+    (currentPage - 1) * itemsPerPage,
+    currentPage * itemsPerPage
+  );
 
   return (
     <div className="space-y-6">
@@ -162,19 +198,22 @@ export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
       {/* Search and Filters Bar */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4">
         {/* Top Search Input & Sort */}
-        <div className="flex flex-col md:flex-row items-center justify-between gap-3">
+        <form
+          onSubmit={handleSearchSubmit}
+          className="flex flex-col md:flex-row items-center justify-between gap-3"
+        >
           <div className="relative w-full md:w-96">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setCurrentPage(1);
-              }}
+              onChange={handleSearchInputChange}
               placeholder='Search (e.g. "I need a dataset for predicting customer churn")...'
               className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-4 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-indigo-500"
             />
+            {isLoading && (
+              <Loader2 className="w-3.5 h-3.5 text-indigo-500 absolute right-3 top-2.5 animate-spin" />
+            )}
           </div>
 
           <div className="flex items-center gap-2 w-full md:w-auto">
@@ -190,7 +229,7 @@ export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
               <option value="usage">Most used</option>
             </select>
           </div>
-        </div>
+        </form>
 
         {/* Filters Controls Row (Category, Min Quality Slider, Max Cost Slider, License) */}
         <div className="pt-3 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
@@ -273,13 +312,13 @@ export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
           </div>
         </div>
 
-        {searchQuery.trim() && (
+        {activeQuery && (
           <div className="text-xs text-slate-500 pt-2 border-t border-slate-100 flex items-center justify-between">
             <span>
-              Showing search results for <strong className="text-slate-800">"{searchQuery}"</strong> ({filtered.length} datasets found)
+              Showing search results for <strong className="text-slate-800">"{activeQuery}"</strong> ({filtered.length} datasets found)
             </span>
             <button
-              onClick={() => setSearchQuery('')}
+              onClick={handleClearSearch}
               className="text-indigo-600 hover:underline cursor-pointer font-medium"
             >
               Clear Search
@@ -288,17 +327,44 @@ export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
         )}
       </div>
 
+      {/* Network Error State with Retry Button */}
+      {errorMessage && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center justify-between gap-3 text-xs text-red-800">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+          <button
+            onClick={() => fetchDatasets(searchQuery, selectedCategory)}
+            className="px-3 py-1 bg-white border border-red-300 rounded-lg text-red-700 font-semibold hover:bg-red-50 cursor-pointer flex items-center gap-1.5 shrink-0"
+          >
+            <RefreshCw className="w-3 h-3" />
+            <span>Retry</span>
+          </button>
+        </div>
+      )}
+
+      {/* Loading State Spinner */}
+      {isLoading && realDatasets.length === 0 && (
+        <div className="bg-white border border-slate-200 rounded-xl p-12 text-center text-slate-500 space-y-3">
+          <Loader2 className="w-6 h-6 text-indigo-600 animate-spin mx-auto" />
+          <p className="text-xs font-semibold">Loading datasets from backend catalog...</p>
+        </div>
+      )}
+
       {/* Dataset Cards Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {paginated.length === 0 ? (
+        {!isLoading && paginated.length === 0 ? (
           <div className="col-span-2 p-12 text-center text-slate-500 bg-white border border-slate-200 rounded-xl">
-            No datasets matched your criteria. Try adjusting your search term or filter sliders.
+            {activeQuery
+              ? `No datasets matched "${activeQuery}". Try adjusting your search term or category.`
+              : 'No datasets found. Be the first to contribute a dataset to the marketplace!'}
           </div>
         ) : (
           paginated.map((ds) => {
             const isOwner = ds.authorId === currentUser.id;
             const isUnlocked = isOwner || ds.unlockedBy.includes(currentUser.id);
-            const matchPct = calculateMatchPct(ds, searchQuery);
+            const matchScore = ds.matchScore ?? null;
 
             return (
               <div
@@ -316,10 +382,10 @@ export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
                       <span className="px-2 py-0.5 rounded text-[11px] font-mono uppercase bg-slate-100 text-slate-600 border border-slate-200">
                         {ds.format}
                       </span>
-                      {/* Green "96% match" badge when search term entered */}
-                      {matchPct !== null && (
+                      {/* Real Match Score Badge from backend vector search */}
+                      {matchScore !== null && (
                         <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                          {matchPct}% match
+                          {matchScore}% match
                         </span>
                       )}
                     </div>

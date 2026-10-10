@@ -1,22 +1,17 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ArrowLeft,
-  Database,
   Search,
   Lock,
   Unlock,
-  Sparkles,
-  TrendingUp,
-  Table,
-  CheckCircle2,
-  FileCode,
-  Tag,
-  Coins,
-  History,
   ShieldCheck,
-  ExternalLink,
+  Loader2,
+  AlertCircle,
+  RefreshCw,
 } from 'lucide-react';
 import { AppDataset, UserAccount, PageRoute } from '../types';
+import { api, ApiError } from '../services/api';
+import { backendDatasetToAppDataset } from '../services/datasetAdapter';
 
 interface DatasetDetailViewProps {
   dataset: AppDataset;
@@ -27,12 +22,64 @@ interface DatasetDetailViewProps {
 }
 
 export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
-  dataset,
+  dataset: initialDataset,
   currentUser,
   onNavigate,
   onOpenQueryWithPrompt,
   onImproveDataset,
 }) => {
+  const [dataset, setDataset] = useState<AppDataset>(initialDataset);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const fetchDatasetDetails = async (datasetId: string) => {
+    setIsLoading(true);
+    setLoadError(null);
+
+    try {
+      // 1. Fetch dataset details from GET /datasets/{id}
+      const backendDetail = await api.datasets.getDataset(datasetId);
+
+      // 2. Attempt to fetch evaluation metrics from GET /datasets/{id}/evaluation
+      let evalData = null;
+      try {
+        evalData = await api.datasets.getEvaluation(datasetId);
+      } catch {
+        // Evaluation may not exist or not ready yet; fallback gracefully
+      }
+
+      const mergedAppDataset = backendDatasetToAppDataset(
+        backendDetail,
+        currentUser.id,
+        evalData
+      );
+
+      // Preserve any client-side unlocked state or versions
+      mergedAppDataset.unlockedBy = Array.from(
+        new Set([
+          ...(initialDataset.unlockedBy || []),
+          ...(mergedAppDataset.unlockedBy || []),
+        ])
+      );
+
+      setDataset(mergedAppDataset);
+    } catch (err: any) {
+      const message =
+        err instanceof ApiError
+          ? err.message
+          : 'Unable to load dataset details from backend server.';
+      setLoadError(message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (initialDataset?.id) {
+      fetchDatasetDetails(initialDataset.id);
+    }
+  }, [initialDataset?.id]);
+
   const isOwner = dataset.authorId === currentUser.id;
   const isUnlocked = isOwner || dataset.unlockedBy.includes(currentUser.id);
 
@@ -65,8 +112,32 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
         </div>
       </div>
 
+      {/* Error state banner */}
+      {loadError && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center justify-between gap-3 text-xs text-red-800">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{loadError}</span>
+          </div>
+          <button
+            onClick={() => fetchDatasetDetails(dataset.id)}
+            className="px-3 py-1 bg-white border border-red-300 rounded-lg text-red-700 font-semibold hover:bg-red-50 cursor-pointer flex items-center gap-1.5 shrink-0"
+          >
+            <RefreshCw className="w-3 h-3" />
+            <span>Retry</span>
+          </button>
+        </div>
+      )}
+
       {/* Main Header Card */}
-      <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-4">
+      <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-4 relative">
+        {isLoading && (
+          <div className="absolute top-4 right-4 flex items-center gap-1.5 text-xs text-indigo-600 font-medium">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            <span>Syncing backend metadata...</span>
+          </div>
+        )}
+
         <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
@@ -76,7 +147,7 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
               <span className="px-2.5 py-0.5 rounded text-xs font-mono uppercase bg-slate-100 text-slate-700 border border-slate-200">
                 {dataset.format}
               </span>
-              <span className="px-2 py-0.5 rounded text-xs font-mono text-slate-500 bg-slate-50 border border-slate-200">
+              <span className="px-2.5 py-0.5 rounded text-xs font-mono text-slate-500 bg-slate-50 border border-slate-200">
                 {dataset.currentVersion}
               </span>
               {dataset.status === 'REJECTED' ? (
@@ -93,7 +164,7 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
                 </span>
               ) : (
                 <span className="px-2.5 py-0.5 rounded text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200 flex items-center gap-1">
-                  <Lock className="w-3 h-3" /> Locked ({dataset.cost || 20} cr)
+                  <Lock className="w-3 h-3" /> Locked ({dataset.cost || 1} cr)
                 </span>
               )}
             </div>
@@ -101,7 +172,7 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
             <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
               {dataset.title}
             </h1>
-            <p className="text-xs font-mono text-slate-400">{dataset.name}</p>
+            <p className="text-xs font-mono text-slate-400">{dataset.name} (ID: {dataset.id})</p>
             <p className="text-sm text-slate-600 max-w-3xl leading-relaxed">
               {dataset.description}
             </p>
@@ -173,7 +244,7 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
           </div>
 
           <div className="pt-2 text-xs text-slate-500 border-t border-slate-100 leading-relaxed">
-            Formula: Overall Score is computed as the average of Schema Quality and Semantic Domain Relevance.
+            Formula: Overall Score is computed as the composite of Schema Quality and Semantic Domain Relevance.
           </div>
         </div>
 
@@ -251,14 +322,14 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
           </div>
           <div>
             <h3 className="text-sm font-bold text-slate-900">
-              {isOwner ? 'Dataset Contributor Access' : isUnlocked ? 'Dataset Already Unlocked' : 'Unlock Policy: 20 Compute Credits'}
+              {isOwner ? 'Dataset Contributor Access' : isUnlocked ? 'Dataset Access Unlocked' : 'Unlock Policy: 1 Compute Credit'}
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
               {isOwner
                 ? 'As the author, you have permanent unrestricted query access at 0 credits.'
                 : isUnlocked
-                ? 'You have already unlocked this dataset. Future queries in the workspace cost 0 credits.'
-                : 'Unlock fee is 20 credits once, charged ONLY after your first successful query. Contributor receives +20 credits.'}
+                ? 'You have access to this dataset. Standard queries charged per backend policy.'
+                : 'Query fee is 1 credit per paid query. The original contributor receives 1 credit royalty reward.'}
             </p>
           </div>
         </div>
@@ -272,7 +343,7 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
         </button>
       </div>
 
-      {/* Sample Queries Carousel */}
+      {/* Sample Queries */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-xs font-semibold text-slate-900 uppercase tracking-wide">
@@ -297,15 +368,15 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
         </div>
       </div>
 
-      {/* Columns Table with Synonym Chips */}
+      {/* Columns Table */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
         <div className="p-5 border-b border-slate-200 flex items-center justify-between">
           <div>
             <h3 className="text-sm font-bold text-slate-900">
-              Columns & Synonym Resolution ({dataset.columns.length})
+              Columns & Schema Metadata ({dataset.columns.length})
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Natural language queries resolve these synonym mappings automatically.
+              Verified columns and data types from analytical table storage.
             </p>
           </div>
           <span className="text-xs font-mono text-slate-500 bg-slate-100 px-2.5 py-1 rounded">
@@ -320,85 +391,43 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
                 <th className="py-2.5 px-4 font-semibold">Column Name</th>
                 <th className="py-2.5 px-4 font-semibold">Data Type</th>
                 <th className="py-2.5 px-4 font-semibold">Null Count</th>
-                <th className="py-2.5 px-4 font-semibold">Distinct</th>
                 <th className="py-2.5 px-4 font-semibold">Recognized Synonyms</th>
-                <th className="py-2.5 px-4 font-semibold">Description</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-slate-700">
-              {dataset.columns.map((col, idx) => (
-                <tr key={idx} className="hover:bg-slate-50/50">
-                  <td className="py-2.5 px-4 font-mono font-semibold text-indigo-700">
-                    {col.name}
-                  </td>
-                  <td className="py-2.5 px-4 font-mono text-slate-600">
-                    {col.type}
-                  </td>
-                  <td className="py-2.5 px-4 font-mono text-slate-600">
-                    {col.nullCount} ({col.nullPct}%)
-                  </td>
-                  <td className="py-2.5 px-4 font-mono text-slate-600">
-                    {col.distinctCount.toLocaleString()}
-                  </td>
-                  <td className="py-2.5 px-4">
-                    <div className="flex flex-wrap gap-1">
-                      {col.synonyms.map((s, sIdx) => (
-                        <span
-                          key={sIdx}
-                          className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 text-slate-600 border border-slate-200"
-                        >
-                          {s}
-                        </span>
-                      ))}
-                    </div>
-                  </td>
-                  <td className="py-2.5 px-4 text-slate-500 max-w-xs truncate">
-                    {col.description || '—'}
+              {dataset.columns.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="py-6 text-center text-slate-400">
+                    No schema columns registered for this dataset.
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* 5-Row Preview Table */}
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-        <div className="p-5 border-b border-slate-200 flex items-center justify-between">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900">
-              5-Row Data Preview
-            </h3>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Live sample slice extracted from {dataset.name}
-            </p>
-          </div>
-          <span className="text-[11px] font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded">
-            Verified Clean
-          </span>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
-            <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 text-[11px] font-sans">
-              <tr>
-                {dataset.columns.map((col, idx) => (
-                  <th key={idx} className="py-2.5 px-4 font-semibold">
-                    {col.name}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 text-slate-700">
-              {dataset.previewRows.slice(0, 5).map((row, rIdx) => (
-                <tr key={rIdx} className="hover:bg-slate-50/50">
-                  {dataset.columns.map((col, cIdx) => (
-                    <td key={cIdx} className="py-2.5 px-4">
-                      {row[col.name] !== undefined ? String(row[col.name]) : '—'}
+              ) : (
+                dataset.columns.map((col, idx) => (
+                  <tr key={idx} className="hover:bg-slate-50/50">
+                    <td className="py-2.5 px-4 font-mono font-semibold text-indigo-700">
+                      {col.name}
                     </td>
-                  ))}
-                </tr>
-              ))}
+                    <td className="py-2.5 px-4 font-mono text-slate-600">
+                      {col.type}
+                    </td>
+                    <td className="py-2.5 px-4 font-mono text-slate-600">
+                      {col.nullCount} ({col.nullPct}%)
+                    </td>
+                    <td className="py-2.5 px-4">
+                      <div className="flex flex-wrap gap-1">
+                        {col.synonyms.map((s, sIdx) => (
+                          <span
+                            key={sIdx}
+                            className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 text-slate-600 border border-slate-200"
+                          >
+                            {s}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>

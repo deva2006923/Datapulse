@@ -84,6 +84,86 @@ export interface UserLoginRequest {
   password: string;
 }
 
+export interface SearchRequest {
+  query: string;
+  domain?: string;
+  limit?: number;
+}
+
+export interface SearchItem {
+  dataset_id: string;
+  name: string;
+  domain: string;
+  score: number;
+  summary: string;
+  rows_count: number;
+}
+
+export interface SearchResponse {
+  query: string;
+  results: SearchItem[];
+  total: number;
+  method: string;
+}
+
+export interface DatasetListResponse {
+  datasets: BackendDatasetDetail[];
+  total: number;
+}
+
+export interface QueryRequest {
+  query: string;
+  dataset_id?: string;
+}
+
+export interface QueryResponse {
+  query: string;
+  answer: string;
+  matching_datasets: string[];
+  records_analyzed: number;
+  relevance_score: number;
+  method: string;
+  sql_query?: string | null;
+  columns?: string[] | null;
+  results?: Record<string, any>[] | null;
+  credits_charged?: number | null;
+}
+
+export interface TransactionItem {
+  id: string;
+  user_id: string;
+  amount: number;
+  transaction_type: string;
+  description: string;
+  status: string;
+  created_at: string;
+}
+
+export interface RedeemRequest {
+  amount: number;
+  payout_method: string;
+  destination: string;
+}
+
+export interface RedeemResponse {
+  success: boolean;
+  redeemed_credits: number;
+  cash_value_usd: number;
+  remaining_balance: number;
+  transaction_id: string;
+  message: string;
+}
+
+export interface UserStatsResponse {
+  user_id: string;
+  email: string;
+  credits_balance: number;
+  datasets_uploaded: number;
+  total_evaluations_completed: number;
+  average_quality_score: number;
+  recent_transactions: TransactionItem[];
+}
+
 export interface ColumnDefinition {
   name: string;
   type: string;
@@ -136,6 +216,7 @@ export interface AppDataset {
   versionHistory: DatasetVersionEntry[];
   unlockedBy: string[]; // List of userIds who unlocked this dataset
   sampleQueries: string[];
+  matchScore?: number;
 }
 
 export interface WalletTransaction {

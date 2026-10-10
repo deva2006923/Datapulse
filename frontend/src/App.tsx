@@ -31,6 +31,10 @@ import {
 } from './types';
 
 import { api } from './services/api';
+import {
+  backendDatasetToAppDataset,
+  transactionItemToWalletTransaction,
+} from './services/datasetAdapter';
 
 import {
   INITIAL_USERS,
@@ -192,6 +196,28 @@ export default function App() {
         setUsers((prev) => ({ ...prev, [me.id]: restoredAccount }));
         setCurrentUserId(me.id);
         setIsAuthenticated(true);
+
+        // Fetch real datasets from backend catalog
+        try {
+          const dsList = await api.datasets.list();
+          if (dsList?.datasets && dsList.datasets.length > 0 && isMounted) {
+            const mappedDs = dsList.datasets.map((d) =>
+              backendDatasetToAppDataset(d, me.id)
+            );
+            setDatasets(mappedDs);
+            setSelectedDatasetId((prev) =>
+              mappedDs.some((d) => d.id === prev) ? prev : mappedDs[0].id
+            );
+          }
+        } catch {}
+
+        // Fetch real credit ledger transactions from backend
+        try {
+          const txList = await api.credits.getTransactions();
+          if (txList && isMounted) {
+            setTransactions(txList.map(transactionItemToWalletTransaction));
+          }
+        } catch {}
       } catch {
         if (!isMounted) return;
         api.auth.logout();
@@ -254,6 +280,31 @@ export default function App() {
       `Welcome, ${user.full_name}! Active session verified.`,
       'emerald'
     );
+
+    // Refresh datasets & transactions for logged in user
+    api.datasets
+      .list()
+      .then((dsList) => {
+        if (dsList?.datasets && dsList.datasets.length > 0) {
+          const mapped = dsList.datasets.map((d) =>
+            backendDatasetToAppDataset(d, user.id)
+          );
+          setDatasets(mapped);
+          setSelectedDatasetId((prev) =>
+            mapped.some((d) => d.id === prev) ? prev : mapped[0].id
+          );
+        }
+      })
+      .catch(() => {});
+
+    api.credits
+      .getTransactions()
+      .then((txList) => {
+        if (txList) {
+          setTransactions(txList.map(transactionItemToWalletTransaction));
+        }
+      })
+      .catch(() => {});
   };
 
   const handleLogout = () => {
@@ -355,7 +406,95 @@ export default function App() {
     );
 
     if (isAuthenticated) {
-      api.auth.getMe().then((me) => {
+      api.auth
+        .getMe()
+        .then((me) => {
+          setUsers((prev) => {
+            const u = prev[me.id];
+            if (!u) return prev;
+            return {
+              ...prev,
+              [me.id]: {
+                ...u,
+                credits: me.credits,
+              },
+            };
+          });
+        })
+        .catch(() => {});
+
+      api.datasets
+        .list()
+        .then((dsList) => {
+          if (dsList?.datasets && dsList.datasets.length > 0) {
+            const mapped = dsList.datasets.map((d) =>
+              backendDatasetToAppDataset(d, currentUser.id)
+            );
+            setDatasets(mapped);
+          }
+        })
+        .catch(() => {});
+
+      api.credits
+        .getTransactions()
+        .then((txList) => {
+          if (txList) {
+            setTransactions(txList.map(transactionItemToWalletTransaction));
+          }
+        })
+        .catch(() => {});
+    }
+  };
+
+  // Real Backend Natural Language Query Execution
+  const handleExecuteQuery = async (
+    dataset: AppDataset,
+    prompt: string,
+    onSuccess: (result: {
+      generatedSql: string;
+      rows: Record<string, any>[];
+      executionMs: number;
+      chargedCredits: number;
+      explanation: string;
+      recordsAnalyzed?: number;
+      matchingDatasets?: string[];
+      columns?: string[];
+    }) => void,
+    onError: (err: {
+      type: string;
+      message: string;
+      shortfall?: number;
+    }) => void
+  ) => {
+    const startTime = performance.now();
+    try {
+      // 1. Submit natural language question to backend POST /query with dataset ID
+      const res = await api.query.execute(prompt, dataset.id);
+      const execTime = Math.round(performance.now() - startTime);
+
+      const charged = res.credits_charged ?? 0;
+      const rows = res.results || [];
+      const cols = res.columns || (rows.length > 0 ? Object.keys(rows[0]) : []);
+
+      // 2. Record query in local session history
+      const historyItem: QueryHistoryItem = {
+        id: `qh_${Date.now()}`,
+        userId: currentUser.id,
+        datasetId: dataset.id,
+        datasetName: dataset.title || dataset.name,
+        naturalPrompt: prompt,
+        generatedSql: res.sql_query || '-- No SQL returned',
+        rowsReturned: rows.length,
+        status: 'SUCCESS',
+        creditsCharged: charged,
+        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
+        executionTimeMs: execTime,
+      };
+      setQueryHistory((prev) => [historyItem, ...prev]);
+
+      // 3. Refresh authoritative user credit balance from GET /auth/me
+      try {
+        const me = await api.auth.getMe();
         setUsers((prev) => {
           const u = prev[me.id];
           if (!u) return prev;
@@ -367,230 +506,99 @@ export default function App() {
             },
           };
         });
-      }).catch(() => {});
-    }
-  };
-
-  // Query Execution & Unlock Charge Logic
-  const handleExecuteQuery = (
-    dataset: AppDataset,
-    prompt: string,
-    onSuccess: (result: {
-      generatedSql: string;
-      rows: Record<string, any>[];
-      executionMs: number;
-      chargedCredits: number;
-      explanation: string;
-    }) => void,
-    onError: (err: {
-      type: 'SQL_REJECTED' | 'INSUFFICIENT_CREDITS';
-      message: string;
-      shortfall?: number;
-    }) => void
-  ) => {
-    // 1. Check for Forbidden SQL mutations (DELETE / DROP / UPDATE / INSERT / ALTER / TRUNCATE)
-    const upperPrompt = prompt.toUpperCase();
-    const isForbidden =
-      upperPrompt.includes('DELETE') ||
-      upperPrompt.includes('DROP') ||
-      upperPrompt.includes('UPDATE') ||
-      upperPrompt.includes('INSERT') ||
-      upperPrompt.includes('ALTER') ||
-      upperPrompt.includes('TRUNCATE');
-
-    if (isForbidden) {
-      setTimeout(() => {
-        const historyItem: QueryHistoryItem = {
-          id: `qh_${Date.now()}`,
-          userId: currentUser.id,
-          datasetId: dataset.id,
-          datasetName: dataset.name,
-          naturalPrompt: prompt,
-          generatedSql: `-- SQL_REJECTED: Mutating queries rejected\n-- Input statement: ${prompt}`,
-          rowsReturned: 0,
-          status: 'SQL_REJECTED',
-          creditsCharged: 0,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-          executionTimeMs: 4.1,
-        };
-        setQueryHistory((prev) => [historyItem, ...prev]);
-
-        onError({
-          type: 'SQL_REJECTED',
-          message:
-            'Destructive mutations (DELETE, DROP, UPDATE, INSERT, ALTER) are rejected by read-only query safety policies. No charges applied.',
-        });
-        addToast(
-          'SQL_REJECTED',
-          'Forbidden mutation blocked. Read-only policy enforced.',
-          'rose'
-        );
-      }, 300);
-      return;
-    }
-
-    // 2. Check Unlock Status & Cost
-    const isOwner = dataset.authorId === currentUser.id;
-    const isAlreadyUnlocked = isOwner || dataset.unlockedBy.includes(currentUser.id);
-    const unlockCost = dataset.cost || 20;
-
-    // If locked, unlock cost is 20 credits, charged only after successful query
-    if (!isAlreadyUnlocked) {
-      if (currentUser.credits < unlockCost) {
-        const shortfall = unlockCost - currentUser.credits;
-        setTimeout(() => {
-          const historyItem: QueryHistoryItem = {
-            id: `qh_${Date.now()}`,
-            userId: currentUser.id,
-            datasetId: dataset.id,
-            datasetName: dataset.name,
-            naturalPrompt: prompt,
-            generatedSql: `-- INSUFFICIENT_CREDITS: Required ${unlockCost} credits, Current ${currentUser.credits} credits`,
-            rowsReturned: 0,
-            status: 'INSUFFICIENT_CREDITS',
-            creditsCharged: 0,
-            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-            executionTimeMs: 2.5,
-          };
-          setQueryHistory((prev) => [historyItem, ...prev]);
-
-          onError({
-            type: 'INSUFFICIENT_CREDITS',
-            message: `Insufficient credits to unlock dataset. Shortfall: ${shortfall} credits.`,
-            shortfall,
-          });
-          addToast(
-            'INSUFFICIENT_CREDITS',
-            `Need ${shortfall} more credits to unlock this dataset.`,
-            'amber'
-          );
-        }, 300);
-        return;
+      } catch {
+        // ignore
       }
-    }
 
-    // 3. Normal Successful Query Execution
-    setTimeout(() => {
-      const execTime = +(11 + Math.random() * 8).toFixed(1);
-      const tableName = dataset.name.replace(/\.[^/.]+$/, '').toLowerCase();
-      const cols = dataset.columns.map((c) => c.name).slice(0, 4).join(', ');
-      const sql = `SELECT ${cols} \nFROM ${tableName} \nWHERE 1=1 \nORDER BY 1 DESC \nLIMIT 5;`;
+      // 4. Refresh live transactions from GET /credits/transactions if credits were charged
+      if (charged > 0) {
+        api.credits
+          .getTransactions()
+          .then((txList) => {
+            if (txList) {
+              setTransactions(txList.map(transactionItemToWalletTransaction));
+            }
+          })
+          .catch(() => {});
+      }
 
-      let charged = 0;
-      let nextTransactions = [...transactions];
+      onSuccess({
+        generatedSql: res.sql_query || '',
+        rows,
+        executionMs: execTime,
+        chargedCredits: charged,
+        explanation: res.answer,
+        recordsAnalyzed: res.records_analyzed,
+        matchingDatasets: res.matching_datasets,
+        columns: cols,
+      });
 
-      // Charge 20 credits once if this was the first unlock
-      if (!isAlreadyUnlocked) {
-        charged = unlockCost;
-
-        // Record User Query Charge
-        const chargeTx: WalletTransaction = {
-          id: `tx_ch_${Date.now()}`,
-          userId: currentUser.id,
-          type: 'QUERY_CHARGE',
-          amount: -unlockCost,
-          description: `Dataset Unlock & Query Charge for ${dataset.title} (-${unlockCost} credits)`,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-        };
-
-        // Record Contributor Royalty (+20)
-        const royaltyTx: WalletTransaction = {
-          id: `tx_roy_${Date.now()}`,
-          userId: dataset.authorId,
-          type: 'CONTRIBUTOR_ROYALTY',
-          amount: 20,
-          description: `Unlock Royalty from ${currentUser.name} on ${dataset.title} (+20 credits)`,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-        };
-
-        nextTransactions = [chargeTx, royaltyTx, ...nextTransactions];
-        setTransactions(nextTransactions);
-
-        // Deduct 20 from current user and give +20 to contributor
-        setUsers((prev) => {
-          const u = prev[currentUser.id];
-          const author = prev[dataset.authorId];
-          const updated = { ...prev };
-
-          if (u) {
-            const uBalance = nextTransactions
-              .filter((t) => t.userId === currentUser.id)
-              .reduce((sum, t) => sum + t.amount, 0);
-
-            updated[currentUser.id] = {
-              ...u,
-              credits: uBalance,
-              unlockedDatasetIds: [...u.unlockedDatasetIds, dataset.id],
-            };
-          }
-
-          if (author && author.id !== currentUser.id) {
-            const authorBalance = nextTransactions
-              .filter((t) => t.userId === author.id)
-              .reduce((sum, t) => sum + t.amount, 0);
-
-            updated[author.id] = {
-              ...author,
-              credits: authorBalance,
-            };
-          }
-
-          return updated;
-        });
-
-        // Mark dataset as unlocked
-        setDatasets((prev) =>
-          prev.map((d) =>
-            d.id === dataset.id
-              ? { ...d, unlockedBy: [...d.unlockedBy, currentUser.id], usageCount: (d.usageCount || 0) + 1 }
-              : d
-          )
-        );
-
+      if (charged === 0) {
         addToast(
-          'DATASET_UNLOCKED',
-          `Dataset unlocked (-${unlockCost} credits). Contributor (${dataset.authorName}) earned +20 credits!`,
+          'QUERY_EXECUTED',
+          `Query executed in ${execTime}ms. (0 credits - Free own-dataset access)`,
           'emerald'
         );
       } else {
-        // Increment usage count
-        setDatasets((prev) =>
-          prev.map((d) =>
-            d.id === dataset.id ? { ...d, usageCount: (d.usageCount || 0) + 1 } : d
-          )
+        addToast(
+          'QUERY_EXECUTED',
+          `Query executed in ${execTime}ms. (-${charged} credits charged)`,
+          'emerald'
         );
       }
+    } catch (error: any) {
+      const execTime = Math.round(performance.now() - startTime);
+      let errorType = 'QUERY_ERROR';
+      let errorMessage = error.message || 'Query execution failed.';
 
-      // Log successful query history
+      if (error.status === 402) {
+        errorType = 'INSUFFICIENT_CREDITS';
+        errorMessage = error.message || 'Insufficient credit balance to execute query.';
+      } else if (error.status === 422) {
+        errorType = error.message?.includes('Security')
+          ? 'SQL_SECURITY_ERROR'
+          : 'SQL_VALIDATION_ERROR';
+      } else if (error.status === 400) {
+        errorType = 'INVALID_QUERY';
+      } else if (error.status === 404) {
+        errorType = 'DATASET_NOT_FOUND';
+      } else if (error.status === 503) {
+        errorType = 'AI_PROVIDER_ERROR';
+      } else if (error.status === 401) {
+        errorType = 'UNAUTHORIZED';
+        errorMessage = 'Authentication expired. Please sign in again.';
+      }
+
+      // Record failed query in queryHistory
       const historyItem: QueryHistoryItem = {
         id: `qh_${Date.now()}`,
         userId: currentUser.id,
         datasetId: dataset.id,
-        datasetName: dataset.name,
+        datasetName: dataset.title || dataset.name,
         naturalPrompt: prompt,
-        generatedSql: sql,
-        rowsReturned: dataset.previewRows.length,
-        status: 'SUCCESS',
-        creditsCharged: charged,
+        generatedSql: `-- FAILED (${errorType}): ${errorMessage}`,
+        rowsReturned: 0,
+        status:
+          errorType === 'INSUFFICIENT_CREDITS'
+            ? 'INSUFFICIENT_CREDITS'
+            : 'SQL_REJECTED',
+        creditsCharged: 0,
         timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
         executionTimeMs: execTime,
       };
       setQueryHistory((prev) => [historyItem, ...prev]);
 
-      const explanation = `Query matched criteria against ${dataset.title} (${dataset.rowCount.toLocaleString()} rows). Compiled read-only query filtered and returned top ${dataset.previewRows.length} rows in ${execTime}ms.`;
-
-      onSuccess({
-        generatedSql: sql,
-        rows: dataset.previewRows,
-        executionMs: execTime,
-        chargedCredits: charged,
-        explanation,
+      onError({
+        type: errorType,
+        message: errorMessage,
       });
 
-      if (charged === 0) {
-        addToast('QUERY_EXECUTED', `Query executed in ${execTime}ms. (0 credits - already unlocked)`, 'emerald');
-      }
-    }, 600);
+      addToast(
+        errorType,
+        errorMessage,
+        errorType === 'INSUFFICIENT_CREDITS' ? 'amber' : 'rose'
+      );
+    }
   };
 
   // Submit Dataset Improvement
@@ -824,6 +832,16 @@ export default function App() {
             currentUser={currentUser}
             onSelectDatasetForDetail={handleOpenDetail}
             onNavigate={handleNavigate}
+            onDatasetsLoaded={(fresh) => {
+              if (fresh.length > 0) {
+                setDatasets((prev) => {
+                  const map = new Map<string, AppDataset>();
+                  prev.forEach((d) => map.set(d.id, d));
+                  fresh.forEach((d) => map.set(d.id, d));
+                  return Array.from(map.values());
+                });
+              }
+            }}
           />
         )}
 
@@ -891,6 +909,19 @@ export default function App() {
             transactions={transactions}
             onRedeemCredits={handleRedeemCredits}
             onTopUpCredits={handleTopUpCredits}
+            onBalanceUpdated={(newBal) => {
+              setUsers((prev) => {
+                const u = prev[currentUser.id];
+                if (!u) return prev;
+                return {
+                  ...prev,
+                  [currentUser.id]: {
+                    ...u,
+                    credits: newBal,
+                  },
+                };
+              });
+            }}
           />
         )}
 

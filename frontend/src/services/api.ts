@@ -3,8 +3,17 @@ import {
   BackendDatasetDetail,
   BackendEvaluationResponse,
   BackendUserResponse,
+  DatasetListResponse,
+  QueryRequest,
+  QueryResponse,
+  RedeemRequest,
+  RedeemResponse,
+  SearchRequest,
+  SearchResponse,
+  TransactionItem,
   UserLoginRequest,
   UserRegisterRequest,
+  UserStatsResponse,
 } from '../types';
 
 const TOKEN_STORAGE_KEY = 'datapulse_auth_token';
@@ -333,6 +342,90 @@ export const api = {
         schema_metadata: schema,
         schema_json: schema,
       };
+    },
+
+    /**
+     * Lists datasets from GET /datasets, optionally filtered by domain.
+     */
+    async list(domain?: string): Promise<DatasetListResponse> {
+      const queryParam = domain && domain !== 'All' ? `?domain=${encodeURIComponent(domain.toLowerCase())}` : '';
+      return request<DatasetListResponse>(`/datasets${queryParam}`, {
+        method: 'GET',
+      });
+    },
+
+    /**
+     * Searches datasets via POST /datasets/search using vector embeddings / TF-IDF hybrid recommender.
+     */
+    async search(
+      query: string,
+      domain?: string,
+      limit: number = 10
+    ): Promise<SearchResponse> {
+      const payload: SearchRequest = {
+        query,
+        domain: domain && domain !== 'All' ? domain.toLowerCase() : undefined,
+        limit,
+      };
+      return request<SearchResponse>('/datasets/search', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    },
+  },
+
+  query: {
+    /**
+     * Executes a natural language query against DuckDB via POST /query.
+     * Request schema: QueryRequest { query: string, dataset_id?: string }
+     * Response schema: QueryResponse
+     */
+    async execute(
+      queryText: string,
+      datasetId?: string
+    ): Promise<QueryResponse> {
+      const payload: QueryRequest = {
+        query: queryText,
+        dataset_id: datasetId || undefined,
+      };
+      return request<QueryResponse>('/query', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    },
+  },
+
+  credits: {
+    /**
+     * Retrieves user credit transaction history via GET /credits/transactions.
+     */
+    async getTransactions(): Promise<TransactionItem[]> {
+      return request<TransactionItem[]>('/credits/transactions', {
+        method: 'GET',
+      });
+    },
+
+    /**
+     * Redeems accumulated credits for cash payout via POST /credits/redeem.
+     * Request schema: RedeemRequest { amount, payout_method, destination }
+     * Response schema: RedeemResponse
+     */
+    async redeem(data: RedeemRequest): Promise<RedeemResponse> {
+      return request<RedeemResponse>('/credits/redeem', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    },
+  },
+
+  user: {
+    /**
+     * Retrieves aggregated user statistics via GET /me/stats.
+     */
+    async getStats(): Promise<UserStatsResponse> {
+      return request<UserStatsResponse>('/me/stats', {
+        method: 'GET',
+      });
     },
   },
 };

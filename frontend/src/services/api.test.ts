@@ -306,3 +306,402 @@ describe('Live Backend Dataset Upload Integration', () => {
     expect(result.columns_count).toBe(3);
   });
 });
+
+describe('Phase 3: Dataset Search and Discovery Integration', () => {
+  let authToken: string;
+  let testDatasetId: string;
+
+  beforeEach(async () => {
+    const res = await api.auth.demoLogin('demo-user');
+    authToken = res.access_token;
+    setStoredToken(authToken);
+
+    // Ensure at least one dataset exists
+    const unique = Date.now();
+    const csvContent = 'sensor_id,temperature,humidity,status\nS-1,22.4,55.1,OK\nS-2,28.9,65.3,WARN\nS-3,19.2,48.0,OK';
+    const file = new File([csvContent], `iot_sensors_${unique}.csv`, { type: 'text/csv' });
+    const uploaded = await api.datasets.upload(file, 'technology', `IoT Grid Sensor Network ${unique}`);
+    testDatasetId = uploaded.id;
+  });
+
+  it('retrieves dataset catalog via GET /datasets', async () => {
+    const listRes = await api.datasets.list();
+    expect(listRes).toBeDefined();
+    expect(listRes.total).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(listRes.datasets)).toBe(true);
+    expect(listRes.datasets.some((d) => d.id === testDatasetId)).toBe(true);
+  });
+
+  it('filters dataset catalog by domain via GET /datasets?domain=technology', async () => {
+    const listRes = await api.datasets.list('technology');
+    expect(listRes).toBeDefined();
+    expect(Array.isArray(listRes.datasets)).toBe(true);
+    expect(listRes.datasets.every((d) => d.domain.toLowerCase() === 'technology')).toBe(true);
+  });
+
+  it('performs semantic search via POST /datasets/search with matches', async () => {
+    const searchRes = await api.datasets.search('Sensor Network', 'technology', 50);
+    expect(searchRes).toBeDefined();
+    expect(searchRes.total).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(searchRes.results)).toBe(true);
+    const match = searchRes.results.find((r) => r.dataset_id === testDatasetId);
+    expect(match).toBeDefined();
+    expect(match?.name).toContain('IoT Grid Sensor Network');
+    expect(match?.score).toBeGreaterThan(0);
+  });
+
+  it('returns empty results list when no datasets match domain or query', async () => {
+    const searchRes = await api.datasets.search('temperature', 'nonexistent_domain_xyz');
+    expect(searchRes).toBeDefined();
+    expect(searchRes.total).toBe(0);
+    expect(searchRes.results.length).toBe(0);
+  });
+
+  it('fetches full dataset details via GET /datasets/:id', async () => {
+    const detail = await api.datasets.getDataset(testDatasetId);
+    expect(detail).toBeDefined();
+    expect(detail.id).toBe(testDatasetId);
+    expect(detail.name).toContain('IoT Grid Sensor Network');
+    expect(detail.rows_count).toBe(3);
+    expect(detail.columns_count).toBe(4);
+    expect(detail.schema_metadata).toBeDefined();
+    expect(detail.content_summary).toBeDefined();
+  });
+
+  it('fetches automated quality evaluation via GET /datasets/:id/evaluation', async () => {
+    const evalData = await api.datasets.getEvaluation(testDatasetId);
+    expect(evalData).toBeDefined();
+    expect(evalData.dataset_id).toBe(testDatasetId);
+    expect(evalData.status).toBe('completed');
+    expect(evalData.quality_score).toBeGreaterThan(0);
+    expect(evalData.overall_score).toBeGreaterThan(0);
+  });
+
+  it('handles non-existent dataset ID with 404 Not Found', async () => {
+    try {
+      await api.datasets.getDataset('ds_non_existent_999999');
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(404);
+      expect(err.message).toContain('not found');
+    }
+  });
+});
+
+describe('Phase 4: Natural-Language Query and Actual DuckDB Results', () => {
+  let testDatasetId: string;
+
+  beforeEach(async () => {
+    const res = await api.auth.demoLogin('demo-user');
+    setStoredToken(res.access_token);
+
+    const csvContent = 'device,metric,value\nD-10,cpu,45\nD-20,ram,78\nD-30,disk,23\nD-40,cpu,89';
+    const file = new File([csvContent], `metrics_${Date.now()}.csv`, { type: 'text/csv' });
+    const uploaded = await api.datasets.upload(file, 'technology', 'System Performance Metrics');
+    testDatasetId = uploaded.id;
+  });
+
+  it('executes a natural-language query and returns real DuckDB results and SQL', async () => {
+    // Query contains count/how many keywords supported by SQL fallback
+    const queryRes = await api.query.execute('how many devices are in the dataset?', testDatasetId);
+
+    expect(queryRes).toBeDefined();
+    expect(queryRes.query).toBe('how many devices are in the dataset?');
+    expect(queryRes.answer).toBeDefined();
+    expect(queryRes.sql_query).toBeDefined();
+    expect(queryRes.sql_query?.toUpperCase()).toContain('SELECT');
+    expect(queryRes.columns).toBeDefined();
+    expect(Array.isArray(queryRes.columns)).toBe(true);
+    expect(queryRes.results).toBeDefined();
+    expect(Array.isArray(queryRes.results)).toBe(true);
+    expect(queryRes.records_analyzed).toBe(4);
+    // Since demo-user owns this dataset, credits_charged must be 0
+    expect(queryRes.credits_charged).toBe(0);
+  });
+
+  it('returns 0 credits charged when querying own dataset (own-dataset exemption)', async () => {
+    const queryRes = await api.query.execute('show items in the catalog', testDatasetId);
+    expect(queryRes).toBeDefined();
+    expect(queryRes.credits_charged).toBe(0);
+  });
+
+  it('rejects unauthenticated query with 401 Unauthorized', async () => {
+    clearStoredToken();
+    try {
+      await api.query.execute('count rows', testDatasetId);
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(401);
+    }
+  });
+
+  it('rejects query targeting non-existent dataset with 404 Not Found', async () => {
+    try {
+      await api.query.execute('how many rows?', 'ds_missing_000000');
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(404);
+      expect(err.message).toContain('not found');
+    }
+  });
+
+  it('handles AI provider error with 503 without false credit deductions', async () => {
+    const meBefore = await api.auth.getMe();
+    try {
+      // Query that does not match fallback rules triggers AI provider attempt (503 when key unset)
+      await api.query.execute('complex non-fallback mathematical inference question', testDatasetId);
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(503);
+    }
+
+    // Credits must remain untouched
+    const meAfter = await api.auth.getMe();
+    expect(meAfter.credits).toBe(meBefore.credits);
+  });
+
+  it('rejects query when user has 0 credits and queries another user dataset with 402 Payment Required', async () => {
+    // 1. Create a user with 0 credits by registering and redeeming all 100 credits
+    const unique = Math.random().toString(36).substring(2, 8);
+    const brokeUser = await api.auth.register({
+      email: `broke_${unique}@datapulse.io`,
+      password: 'Password123!',
+      full_name: 'Broke User',
+    });
+    setStoredToken(brokeUser.access_token);
+
+    // Redeem all 100 credits
+    await api.credits.redeem({
+      amount: 100,
+      payout_method: 'bank_transfer',
+      destination: 'ACC123456789',
+    });
+
+    // Verify balance is now 0
+    const me = await api.auth.getMe();
+    expect(me.credits).toBe(0);
+
+    // 2. Attempt to query testDatasetId (owned by demo-user)
+    try {
+      await api.query.execute('how many devices?', testDatasetId);
+      expect(true).toBe(false); // Should not succeed
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(402);
+      expect(err.message).toContain('Insufficient credit balance');
+    }
+
+    // Verify balance was NOT negatively altered
+    const meAfter = await api.auth.getMe();
+    expect(meAfter.credits).toBe(0);
+  });
+});
+
+describe('Phase 5: Credit Balance and Transactions Integration', () => {
+  let userToken: string;
+  let testEmail: string;
+
+  beforeEach(async () => {
+    const unique = Math.random().toString(36).substring(2, 8);
+    testEmail = `credits_test_${unique}@datapulse.io`;
+    const regRes = await api.auth.register({
+      email: testEmail,
+      password: 'Password123!',
+      full_name: 'Credits Tester',
+    });
+    userToken = regRes.access_token;
+    setStoredToken(userToken);
+  });
+
+  it('retrieves authoritative initial credit balance of 100 via GET /auth/me and GET /me/stats', async () => {
+    const me = await api.auth.getMe();
+    expect(me.credits).toBe(100);
+
+    const stats = await api.user.getStats();
+    expect(stats.credits_balance).toBe(100);
+    expect(stats.datasets_uploaded).toBe(0);
+  });
+
+  it('refreshes credit balance after dataset upload', async () => {
+    const initialMe = await api.auth.getMe();
+    const initialCredits = initialMe.credits;
+
+    const csvData = 'id,name,role\n1,Alex,Analyst\n2,Jordan,Engineer';
+    const file = new File([csvData], `staff_${Date.now()}.csv`, { type: 'text/csv' });
+    const uploadRes = await api.datasets.upload(file, 'general', 'Staff Directory');
+
+    expect(uploadRes.credits_awarded).toBeGreaterThanOrEqual(50);
+
+    // Re-fetch balance from backend
+    const updatedMe = await api.auth.getMe();
+    expect(updatedMe.credits).toBe(initialCredits + uploadRes.credits_awarded!);
+  });
+
+  it('retrieves real transaction history via GET /credits/transactions', async () => {
+    // Fresh user has signup bonus or initial transaction
+    const txList = await api.credits.getTransactions();
+    expect(Array.isArray(txList)).toBe(true);
+
+    // Perform a redemption to create a known transaction
+    const redeemRes = await api.credits.redeem({
+      amount: 25,
+      payout_method: 'bank_transfer',
+      destination: 'ACC-VERIFY-123',
+    });
+    expect(redeemRes.success).toBe(true);
+    expect(redeemRes.redeemed_credits).toBe(25);
+    expect(redeemRes.remaining_balance).toBe(75);
+
+    // Fetch transactions again
+    const updatedTx = await api.credits.getTransactions();
+    expect(updatedTx.length).toBeGreaterThan(0);
+    const redeemTx = updatedTx.find((t) => t.id === redeemRes.transaction_id);
+    expect(redeemTx).toBeDefined();
+    expect(redeemTx?.amount).toBe(-25);
+    expect(redeemTx?.transaction_type).toBe('redeem');
+    expect(redeemTx?.status).toBe('completed');
+  });
+
+  it('rejects redemption exceeding balance with 400 Bad Request', async () => {
+    try {
+      await api.credits.redeem({
+        amount: 500, // User only has 100 credits
+        payout_method: 'crypto',
+        destination: '0xABCDEF',
+      });
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(400);
+      expect(err.message).toContain('Insufficient credit balance');
+    }
+  });
+
+  it('rejects redemption of 0 or negative credits with 422 Unprocessable Entity', async () => {
+    try {
+      await api.credits.redeem({
+        amount: 0,
+        payout_method: 'bank_transfer',
+        destination: 'ACC-ZERO',
+      });
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(422);
+      expect(err.message).toContain('greater than 0');
+    }
+  });
+});
+
+describe('Dataset & Transaction Adapters', () => {
+  it('correctly maps backend dataset response to AppDataset', async () => {
+    const { backendDatasetToAppDataset } = await import('./datasetAdapter');
+
+    const backendData = {
+      id: 'ds_test_adapter_1',
+      user_id: 'user_xyz',
+      name: 'E-Commerce Transactions',
+      filename: 'ecommerce.csv',
+      domain: 'retail',
+      rows_count: 1000,
+      columns_count: 5,
+      quality_score: 92,
+      domain_relevance_score: 88,
+      overall_score: 90,
+      content_summary: 'E-commerce order history dataset',
+      schema_metadata: { order_id: 'string', total: 'float', items: 'int' },
+      created_at: '2026-10-10T12:00:00Z',
+    };
+
+    const appDataset = backendDatasetToAppDataset(backendData, 'user_xyz');
+    expect(appDataset.id).toBe('ds_test_adapter_1');
+    expect(appDataset.title).toBe('E-Commerce Transactions');
+    expect(appDataset.domain).toBe('Retail');
+    expect(appDataset.rowCount).toBe(1000);
+    expect(appDataset.columnCount).toBe(5);
+    expect(appDataset.columns.length).toBe(3);
+    expect(appDataset.columns[0].name).toBe('order_id');
+    expect(appDataset.authorName).toBe('You'); // Because currentUserId matches user_id
+    expect(appDataset.cost).toBe(0); // Own dataset cost is 0
+  });
+
+  it('correctly maps search results to AppDataset with matchScore', async () => {
+    const { searchItemToAppDataset } = await import('./datasetAdapter');
+
+    const searchItem = {
+      dataset_id: 'ds_search_1',
+      name: 'Telecom Churn',
+      filename: 'telecom.csv',
+      domain: 'telecom',
+      rows_count: 500,
+      columns_count: 6,
+      quality_score: 88,
+      match_score: 0.94,
+      score: 0.94,
+      summary: 'Customer churn telemetry',
+    };
+
+    const appDataset = searchItemToAppDataset(searchItem);
+    expect(appDataset.id).toBe('ds_search_1');
+    expect(appDataset.title).toBe('Telecom Churn');
+    expect(appDataset.matchScore).toBe(94);
+    expect(appDataset.domain).toBe('Telecom');
+  });
+
+  it('correctly maps transaction items to WalletTransaction types', async () => {
+    const { transactionItemToWalletTransaction } = await import('./datasetAdapter');
+
+    const bonusTx = transactionItemToWalletTransaction({
+      id: 'tx_1',
+      user_id: 'u1',
+      amount: 100,
+      transaction_type: 'bonus',
+      description: 'Signup bonus',
+      status: 'completed',
+      created_at: '2026-10-10T10:00:00Z',
+    });
+    expect(bonusTx.type).toBe('SIGNUP_BONUS');
+    expect(bonusTx.amount).toBe(100);
+
+    const feeTx = transactionItemToWalletTransaction({
+      id: 'tx_2',
+      user_id: 'u1',
+      amount: -1,
+      transaction_type: 'query_fee',
+      description: 'Query deduction',
+      status: 'completed',
+      created_at: '2026-10-10T10:05:00Z',
+    });
+    expect(feeTx.type).toBe('QUERY_CHARGE');
+    expect(feeTx.amount).toBe(-1);
+
+    const rewardTx = transactionItemToWalletTransaction({
+      id: 'tx_3',
+      user_id: 'u1',
+      amount: 1,
+      transaction_type: 'query_reward',
+      description: 'Query royalty',
+      status: 'completed',
+      created_at: '2026-10-10T10:10:00Z',
+    });
+    expect(rewardTx.type).toBe('CONTRIBUTOR_ROYALTY');
+    expect(rewardTx.amount).toBe(1);
+
+    const redeemTx = transactionItemToWalletTransaction({
+      id: 'tx_4',
+      user_id: 'u1',
+      amount: -50,
+      transaction_type: 'redeem',
+      description: 'Redeemed payout',
+      status: 'completed',
+      created_at: '2026-10-10T10:15:00Z',
+    });
+    expect(redeemTx.type).toBe('REDEMPTION');
+    expect(redeemTx.amount).toBe(-50);
+  });
+});
+
