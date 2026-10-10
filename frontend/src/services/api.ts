@@ -156,24 +156,35 @@ async function request<T>(
 }
 
 // Predefined demo credentials for Instant Demo Switcher buttons
-const DEMO_ACCOUNTS: Record<
-  string,
-  { email: string; password: string; full_name: string }
-> = {
+export interface DemoAccountDefinition {
+  key: 'demo-user' | 'alice' | 'bob';
+  email: string;
+  password: string;
+  full_name: string;
+  role: 'Contributor' | 'Data Analyst';
+}
+
+export const DEMO_ACCOUNTS: Record<'demo-user' | 'alice' | 'bob', DemoAccountDefinition> = {
   'demo-user': {
+    key: 'demo-user',
     email: 'demo@datapulse.io',
     password: 'Password123!',
     full_name: 'Demo User',
+    role: 'Contributor',
   },
   alice: {
+    key: 'alice',
     email: 'alice@datapulse.io',
     password: 'Password123!',
-    full_name: 'Alice Chen',
+    full_name: 'Alice Smith',
+    role: 'Contributor',
   },
   bob: {
+    key: 'bob',
     email: 'bob@datapulse.io',
     password: 'Password123!',
-    full_name: 'Bob Vance',
+    full_name: 'Bob Miller',
+    role: 'Data Analyst',
   },
 };
 
@@ -216,17 +227,20 @@ export const api = {
     },
 
     /**
-     * Authenticates with real backend credentials for demo buttons.
-     * Tries login first; if user doesn't exist, automatically registers.
+     * Authenticates with real backend credentials for predefined demo accounts.
+     * Tries login first; if account doesn't exist, automatically registers with backend.
+     * Rejects unknown or generated keys to prevent session corruption.
      */
     async demoLogin(
       accountKey: 'demo-user' | 'alice' | 'bob' | string
     ): Promise<AuthTokenResponse> {
-      const creds = DEMO_ACCOUNTS[accountKey] || {
-        email: `${accountKey}@datapulse.io`,
-        password: 'Password123!',
-        full_name: accountKey.charAt(0).toUpperCase() + accountKey.slice(1),
-      };
+      const creds = DEMO_ACCOUNTS[accountKey as 'demo-user' | 'alice' | 'bob'];
+      if (!creds) {
+        throw new ApiError(
+          `Invalid demo account key: '${accountKey}'. Only predefined demo accounts ('demo-user', 'alice', 'bob') are supported.`,
+          400
+        );
+      }
 
       try {
         return await api.auth.login({
@@ -234,7 +248,7 @@ export const api = {
           password: creds.password,
         });
       } catch (err: any) {
-        // If not found or wrong credentials, register fresh account
+        // If not found or wrong credentials, register fresh account with exact credentials
         if (err?.status === 401 || err?.status === 404) {
           try {
             return await api.auth.register({

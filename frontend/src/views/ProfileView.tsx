@@ -11,18 +11,18 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { UserAccount, AppDataset, QueryHistoryItem } from '../types';
+import { DEMO_ACCOUNTS } from '../services/api';
 
 interface ProfileViewProps {
   currentUser: UserAccount;
-  allUsers: Record<string, UserAccount>;
-  onSwitchUser: (userId: string) => void;
+  allUsers?: Record<string, UserAccount>;
+  onSwitchUser: (demoKey: string) => void;
   datasets: AppDataset[];
   queryHistory: QueryHistoryItem[];
 }
 
 export const ProfileView: React.FC<ProfileViewProps> = ({
   currentUser,
-  allUsers,
   onSwitchUser,
   datasets,
   queryHistory,
@@ -129,12 +129,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {Object.values(allUsers).map((u) => {
-            const isCurrent = u.id === currentUser.id;
+          {Object.values(DEMO_ACCOUNTS).map((demo) => {
+            const isCurrent =
+              currentUser.email.toLowerCase() === demo.email.toLowerCase();
             return (
               <button
-                key={u.id}
-                onClick={() => onSwitchUser(u.id)}
+                key={demo.key}
+                onClick={() => onSwitchUser(demo.key)}
                 className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
                   isCurrent
                     ? 'bg-indigo-50/60 border-indigo-300 ring-2 ring-indigo-500/20'
@@ -142,17 +143,21 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-bold text-slate-900">{u.name}</span>
+                  <span className="text-xs font-bold text-slate-900">{demo.full_name}</span>
                   {isCurrent && (
                     <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded">
                       Active
                     </span>
                   )}
                 </div>
-                <div className="text-[11px] text-slate-500 font-mono">{u.email}</div>
+                <div className="text-[11px] text-slate-500 font-mono">{demo.email}</div>
                 <div className="mt-2 pt-2 border-t border-slate-200/60 flex items-center justify-between text-xs font-mono">
-                  <span className="text-slate-500">{u.role}</span>
-                  <span className="font-bold text-emerald-600">{u.credits} cr</span>
+                  <span className="text-slate-500">{demo.role}</span>
+                  {isCurrent ? (
+                    <span className="font-bold text-emerald-600">{currentUser.credits} cr</span>
+                  ) : (
+                    <span className="text-slate-400 font-medium text-[11px]">Switch session</span>
+                  )}
                 </div>
               </button>
             );

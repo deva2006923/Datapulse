@@ -10,16 +10,10 @@ import {
   Loader2,
 } from 'lucide-react';
 import { PageRoute, BackendUserResponse } from '../types';
-import { api, ApiError } from '../services/api';
+import { api, ApiError, DEMO_ACCOUNTS } from '../services/api';
 
 interface LoginRegisterViewProps {
-  onLoginAs?: (userId: string) => void;
-  onRegisterUser?: (
-    name: string,
-    email: string,
-    role: 'Contributor' | 'Data Analyst'
-  ) => void;
-  onLoginSuccess?: (
+  onLoginSuccess: (
     user: BackendUserResponse,
     token: string,
     role?: 'Contributor' | 'Data Analyst'
@@ -28,8 +22,6 @@ interface LoginRegisterViewProps {
 }
 
 export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
-  onLoginAs,
-  onRegisterUser,
   onLoginSuccess,
   onNavigate,
 }) => {
@@ -46,11 +38,7 @@ export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
     setErrorMessage(null);
     try {
       const res = await api.auth.demoLogin(demoKey);
-      if (onLoginSuccess) {
-        onLoginSuccess(res.user, res.access_token);
-      } else if (onLoginAs) {
-        onLoginAs(demoKey);
-      }
+      onLoginSuccess(res.user, res.access_token);
       onNavigate('dashboard');
     } catch (err: any) {
       if (err instanceof ApiError) {
@@ -88,11 +76,7 @@ export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
           password,
           full_name: name.trim(),
         });
-        if (onLoginSuccess) {
-          onLoginSuccess(res.user, res.access_token, role);
-        } else if (onRegisterUser) {
-          onRegisterUser(name.trim(), email.trim(), role);
-        }
+        onLoginSuccess(res.user, res.access_token, role);
         onNavigate('dashboard');
       } catch (err: any) {
         if (err instanceof ApiError) {
@@ -119,11 +103,7 @@ export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
           email: email.trim(),
           password,
         });
-        if (onLoginSuccess) {
-          onLoginSuccess(res.user, res.access_token);
-        } else if (onLoginAs) {
-          onLoginAs('demo-user');
-        }
+        onLoginSuccess(res.user, res.access_token);
         onNavigate('dashboard');
       } catch (err: any) {
         if (err instanceof ApiError) {
@@ -145,33 +125,20 @@ export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
           Instant Demo Access
         </span>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-          <button
-            type="button"
-            disabled={isLoading}
-            onClick={() => handleDemoClick('demo-user')}
-            className="px-3 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 text-xs font-semibold border border-indigo-200 transition-colors cursor-pointer text-center"
-          >
-            Demo User
-            <span className="block text-[10px] font-normal text-indigo-600 font-mono">100 cr</span>
-          </button>
-          <button
-            type="button"
-            disabled={isLoading}
-            onClick={() => handleDemoClick('alice')}
-            className="px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 disabled:opacity-50 text-slate-700 text-xs font-semibold border border-slate-200 transition-colors cursor-pointer text-center"
-          >
-            Alice
-            <span className="block text-[10px] font-normal text-slate-500 font-mono">220 cr</span>
-          </button>
-          <button
-            type="button"
-            disabled={isLoading}
-            onClick={() => handleDemoClick('bob')}
-            className="px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 disabled:opacity-50 text-slate-700 text-xs font-semibold border border-slate-200 transition-colors cursor-pointer text-center"
-          >
-            Bob
-            <span className="block text-[10px] font-normal text-slate-500 font-mono">100 cr</span>
-          </button>
+          {Object.values(DEMO_ACCOUNTS).map((demo) => (
+            <button
+              key={demo.key}
+              type="button"
+              disabled={isLoading}
+              onClick={() => handleDemoClick(demo.key)}
+              className="px-3 py-2 rounded-lg bg-indigo-50/70 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 text-xs font-semibold border border-indigo-200 transition-colors cursor-pointer text-center"
+            >
+              {demo.full_name}
+              <span className="block text-[10px] font-normal text-indigo-600 font-mono">
+                {demo.role}
+              </span>
+            </button>
+          ))}
         </div>
       </div>
 

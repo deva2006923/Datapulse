@@ -37,7 +37,6 @@ import {
 } from './services/datasetAdapter';
 
 import {
-  INITIAL_USERS,
   INITIAL_DATASETS,
   INITIAL_TRANSACTIONS,
   INITIAL_QUERY_HISTORY,
@@ -64,21 +63,8 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => !!api.auth.getToken());
   const [isAuthRestoring, setIsAuthRestoring] = useState<boolean>(true);
 
-  // Load from localStorage or initialize from fresh seed data
-  const [users, setUsers] = useState<Record<string, UserAccount>>(() => {
-    try {
-      const storedVer = localStorage.getItem('datapulse_version_key');
-      if (storedVer === MOCK_DATA_VERSION) {
-        const saved = localStorage.getItem(`${MOCK_STORAGE_KEY}_users`);
-        if (saved) return JSON.parse(saved);
-      }
-    } catch (e) {
-      // fallback
-    }
-    return INITIAL_USERS;
-  });
-
-  const [currentUserId, setCurrentUserId] = useState<string>('demo-user');
+  // Active authenticated user account from backend
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
 
   const [datasets, setDatasets] = useState<AppDataset[]>(() => {
     try {
@@ -123,20 +109,30 @@ export default function App() {
   const [workspaceInitialPrompt, setWorkspaceInitialPrompt] = useState<string>('');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
-  // Persist state & set version key
+  // Persist local UI caches & set version key (no mock users stored)
   useEffect(() => {
     try {
       localStorage.setItem('datapulse_version_key', MOCK_DATA_VERSION);
-      localStorage.setItem(`${MOCK_STORAGE_KEY}_users`, JSON.stringify(users));
       localStorage.setItem(`${MOCK_STORAGE_KEY}_datasets`, JSON.stringify(datasets));
       localStorage.setItem(`${MOCK_STORAGE_KEY}_transactions`, JSON.stringify(transactions));
       localStorage.setItem(`${MOCK_STORAGE_KEY}_history`, JSON.stringify(queryHistory));
     } catch (e) {
       // ignore
     }
-  }, [users, datasets, transactions, queryHistory]);
+  }, [datasets, transactions, queryHistory]);
 
-  const currentUser = users[currentUserId] || users['demo-user'];
+  // Safe fallback for views requiring a UserAccount while rendering unauthenticated landing
+  const effectiveUser: UserAccount = currentUser || {
+    id: 'unauthenticated',
+    name: 'Guest User',
+    email: 'guest@datapulse.io',
+    role: 'Contributor',
+    credits: 0,
+    reputationScore: 0,
+    contributedDatasetIds: [],
+    unlockedDatasetIds: [],
+    joinedDate: new Date().toISOString().split('T')[0],
+  };
 
   // Toast dispatcher helper
   const addToast = (
@@ -170,6 +166,7 @@ export default function App() {
       if (!token) {
         if (isMounted) {
           setIsAuthenticated(false);
+          setCurrentUser(null);
           setIsAuthRestoring(false);
         }
         return;
@@ -183,18 +180,17 @@ export default function App() {
           id: me.id,
           name: me.full_name,
           email: me.email,
-          role: users[me.id]?.role || 'Contributor',
+          role: 'Contributor',
           credits: me.credits,
-          reputationScore: users[me.id]?.reputationScore ?? 85,
-          contributedDatasetIds: users[me.id]?.contributedDatasetIds || [],
-          unlockedDatasetIds: users[me.id]?.unlockedDatasetIds || [],
+          reputationScore: 85,
+          contributedDatasetIds: [],
+          unlockedDatasetIds: [],
           joinedDate: me.created_at
             ? me.created_at.split('T')[0]
             : new Date().toISOString().split('T')[0],
         };
 
-        setUsers((prev) => ({ ...prev, [me.id]: restoredAccount }));
-        setCurrentUserId(me.id);
+        setCurrentUser(restoredAccount);
         setIsAuthenticated(true);
 
         // Fetch real datasets from backend catalog
@@ -221,6 +217,7 @@ export default function App() {
       } catch {
         if (!isMounted) return;
         api.auth.logout();
+        setCurrentUser(null);
         setIsAuthenticated(false);
         setCurrentRoute((curr) =>
           PROTECTED_ROUTES.includes(curr) ? 'login' : curr
@@ -254,25 +251,24 @@ export default function App() {
 
   const handleAuthSuccess = (
     user: BackendUserResponse,
-    token: string,
+    _token: string,
     role: 'Contributor' | 'Data Analyst' = 'Contributor'
   ) => {
     const userAccount: UserAccount = {
       id: user.id,
       name: user.full_name,
       email: user.email,
-      role: users[user.id]?.role || role,
+      role: role,
       credits: user.credits,
-      reputationScore: users[user.id]?.reputationScore ?? 85,
-      contributedDatasetIds: users[user.id]?.contributedDatasetIds || [],
-      unlockedDatasetIds: users[user.id]?.unlockedDatasetIds || [],
+      reputationScore: 85,
+      contributedDatasetIds: [],
+      unlockedDatasetIds: [],
       joinedDate: user.created_at
         ? user.created_at.split('T')[0]
         : new Date().toISOString().split('T')[0],
     };
 
-    setUsers((prev) => ({ ...prev, [user.id]: userAccount }));
-    setCurrentUserId(user.id);
+    setCurrentUser(userAccount);
     setIsAuthenticated(true);
     setCurrentRoute('dashboard');
     addToast(
@@ -309,57 +305,24 @@ export default function App() {
 
   const handleLogout = () => {
     api.auth.logout();
+    setCurrentUser(null);
     setIsAuthenticated(false);
     setCurrentRoute('login');
     addToast('SESSION_ENDED', 'You have been successfully signed out.', 'emerald');
   };
 
   // Switch Active User (with backend demo authentication)
-  const handleSwitchUser = async (userId: string) => {
+  const handleSwitchUser = async (demoKey: string) => {
     try {
-      const res = await api.auth.demoLogin(userId);
+      const res = await api.auth.demoLogin(demoKey);
       handleAuthSuccess(res.user, res.access_token);
-    } catch {
-      if (users[userId]) {
-        setCurrentUserId(userId);
-        addToast('ACCOUNT_SWITCHED', `Active session switched to ${users[userId].name}.`, 'emerald');
-      }
+    } catch (err: any) {
+      addToast(
+        'SWITCH_FAILED',
+        err?.message || 'Failed to switch demo account. Active session preserved.',
+        'rose'
+      );
     }
-  };
-
-  // Register New User (Starts with 100 credits)
-  const handleRegisterUser = (
-    name: string,
-    email: string,
-    role: 'Contributor' | 'Data Analyst'
-  ) => {
-    const newId = `user_${Date.now()}`;
-    const newUser: UserAccount = {
-      id: newId,
-      name,
-      email,
-      role,
-      credits: 100, // New users get 100 credits
-      reputationScore: 85,
-      contributedDatasetIds: [],
-      unlockedDatasetIds: [],
-      joinedDate: new Date().toISOString().split('T')[0],
-    };
-
-    const signupTx: WalletTransaction = {
-      id: `tx_${Date.now()}`,
-      userId: newId,
-      type: 'SIGNUP_BONUS',
-      amount: 100,
-      description: 'Welcome Sign-up Credit Allocation (+100 credits)',
-      timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-    };
-
-    setUsers((prev) => ({ ...prev, [newId]: newUser }));
-    setTransactions((prev) => [signupTx, ...prev]);
-    setCurrentUserId(newId);
-    setCurrentRoute('dashboard');
-    addToast('WELCOME_BONUS', 'Account created! Received +100 welcome credits.', 'emerald');
   };
 
   // Upload Wizard Final Publish
@@ -370,7 +333,7 @@ export default function App() {
     // Record wallet ledger transaction
     const tx: WalletTransaction = {
       id: `tx_up_${Date.now()}`,
-      userId: currentUser.id,
+      userId: effectiveUser.id,
       type: 'UPLOAD_REWARD',
       amount: earnedCredits,
       description: `Dataset Ingestion Reward for ${newDataset.title} (+${earnedCredits} credits)`,
@@ -379,22 +342,14 @@ export default function App() {
     const nextTransactions = [tx, ...transactions];
     setTransactions(nextTransactions);
 
-    // Update user credits to strictly equal wallet ledger sum
-    const newBalance = nextTransactions
-      .filter((t) => t.userId === currentUser.id)
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    setUsers((prev) => {
-      const u = prev[currentUser.id];
-      if (!u) return prev;
+    // Optimistically update credit balance and append dataset
+    setCurrentUser((prev) => {
+      if (!prev) return null;
       return {
         ...prev,
-        [currentUser.id]: {
-          ...u,
-          credits: newBalance,
-          contributedDatasetIds: [...u.contributedDatasetIds, newDataset.id],
-          unlockedDatasetIds: [...u.unlockedDatasetIds, newDataset.id],
-        },
+        credits: prev.credits + earnedCredits,
+        contributedDatasetIds: [...prev.contributedDatasetIds, newDataset.id],
+        unlockedDatasetIds: [...prev.unlockedDatasetIds, newDataset.id],
       };
     });
 
@@ -409,17 +364,7 @@ export default function App() {
       api.auth
         .getMe()
         .then((me) => {
-          setUsers((prev) => {
-            const u = prev[me.id];
-            if (!u) return prev;
-            return {
-              ...prev,
-              [me.id]: {
-                ...u,
-                credits: me.credits,
-              },
-            };
-          });
+          setCurrentUser((prev) => (prev ? { ...prev, credits: me.credits } : null));
         })
         .catch(() => {});
 
@@ -428,7 +373,7 @@ export default function App() {
         .then((dsList) => {
           if (dsList?.datasets && dsList.datasets.length > 0) {
             const mapped = dsList.datasets.map((d) =>
-              backendDatasetToAppDataset(d, currentUser.id)
+              backendDatasetToAppDataset(d, effectiveUser.id)
             );
             setDatasets(mapped);
           }
@@ -479,7 +424,7 @@ export default function App() {
       // 2. Record query in local session history
       const historyItem: QueryHistoryItem = {
         id: `qh_${Date.now()}`,
-        userId: currentUser.id,
+        userId: effectiveUser.id,
         datasetId: dataset.id,
         datasetName: dataset.title || dataset.name,
         naturalPrompt: prompt,
@@ -495,17 +440,7 @@ export default function App() {
       // 3. Refresh authoritative user credit balance from GET /auth/me
       try {
         const me = await api.auth.getMe();
-        setUsers((prev) => {
-          const u = prev[me.id];
-          if (!u) return prev;
-          return {
-            ...prev,
-            [me.id]: {
-              ...u,
-              credits: me.credits,
-            },
-          };
-        });
+        setCurrentUser((prev) => (prev ? { ...prev, credits: me.credits } : null));
       } catch {
         // ignore
       }
@@ -572,7 +507,7 @@ export default function App() {
       // Record failed query in queryHistory
       const historyItem: QueryHistoryItem = {
         id: `qh_${Date.now()}`,
-        userId: currentUser.id,
+        userId: effectiveUser.id,
         datasetId: dataset.id,
         datasetName: dataset.title || dataset.name,
         naturalPrompt: prompt,
@@ -627,7 +562,7 @@ export default function App() {
             {
               version: nextVer,
               date: new Date().toISOString().split('T')[0],
-              author: currentUser.name,
+              author: effectiveUser.name,
               quality: newQuality,
               relevance: newRelevance,
               changesSummary,
@@ -641,7 +576,7 @@ export default function App() {
     if (creditsAwarded > 0) {
       const tx: WalletTransaction = {
         id: `tx_imp_${Date.now()}`,
-        userId: currentUser.id,
+        userId: effectiveUser.id,
         type: 'IMPROVEMENT_REWARD',
         amount: creditsAwarded,
         description: `Version Improvement Reward (+${creditsAwarded} credits)`,
@@ -650,21 +585,9 @@ export default function App() {
       const nextTransactions = [tx, ...transactions];
       setTransactions(nextTransactions);
 
-      const newBalance = nextTransactions
-        .filter((t) => t.userId === currentUser.id)
-        .reduce((sum, t) => sum + t.amount, 0);
-
-      setUsers((prev) => {
-        const u = prev[currentUser.id];
-        if (!u) return prev;
-        return {
-          ...prev,
-          [currentUser.id]: {
-            ...u,
-            credits: newBalance,
-          },
-        };
-      });
+      setCurrentUser((prev) =>
+        prev ? { ...prev, credits: prev.credits + creditsAwarded } : null
+      );
 
       addToast(
         'VERSION_IMPROVED',
@@ -684,11 +607,11 @@ export default function App() {
 
   // Wallet Redemption Handler (Min 500 cr, Multiples of 100, 100 cr = Rs 10)
   const handleRedeemCredits = (amount: number, rupeeValue: number) => {
-    if (currentUser.credits < amount || amount < 500 || amount % 100 !== 0) return;
+    if (effectiveUser.credits < amount || amount < 500 || amount % 100 !== 0) return;
 
     const tx: WalletTransaction = {
       id: `tx_red_${Date.now()}`,
-      userId: currentUser.id,
+      userId: effectiveUser.id,
       type: 'REDEMPTION',
       amount: -amount,
       description: `Simulated Cash Payout: Redeemed ${amount} credits for ₹${rupeeValue.toFixed(2)}`,
@@ -698,21 +621,9 @@ export default function App() {
     const nextTransactions = [tx, ...transactions];
     setTransactions(nextTransactions);
 
-    const newBalance = nextTransactions
-      .filter((t) => t.userId === currentUser.id)
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    setUsers((prev) => {
-      const u = prev[currentUser.id];
-      if (!u) return prev;
-      return {
-        ...prev,
-        [currentUser.id]: {
-          ...u,
-          credits: newBalance,
-        },
-      };
-    });
+    setCurrentUser((prev) =>
+      prev ? { ...prev, credits: Math.max(0, prev.credits - amount) } : null
+    );
 
     addToast(
       'REDEMPTION_PROCESSED',
@@ -725,7 +636,7 @@ export default function App() {
   const handleTopUpCredits = (amount: number) => {
     const tx: WalletTransaction = {
       id: `tx_top_${Date.now()}`,
-      userId: currentUser.id,
+      userId: effectiveUser.id,
       type: 'MANUAL_RELOAD',
       amount: amount,
       description: `Credits Pool Top-Up (+${amount} credits)`,
@@ -734,21 +645,9 @@ export default function App() {
     const nextTransactions = [tx, ...transactions];
     setTransactions(nextTransactions);
 
-    const newBalance = nextTransactions
-      .filter((t) => t.userId === currentUser.id)
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    setUsers((prev) => {
-      const u = prev[currentUser.id];
-      if (!u) return prev;
-      return {
-        ...prev,
-        [currentUser.id]: {
-          ...u,
-          credits: newBalance,
-        },
-      };
-    });
+    setCurrentUser((prev) =>
+      prev ? { ...prev, credits: prev.credits + amount } : null
+    );
 
     addToast('WALLET_TOPPED_UP', `Added +${amount} credits.`, 'emerald');
   };
@@ -794,7 +693,6 @@ export default function App() {
         currentRoute={currentRoute}
         onNavigate={handleNavigate}
         currentUser={currentUser}
-        allUsers={users}
         onSwitchUser={handleSwitchUser}
         isAuthenticated={isAuthenticated}
         onLogout={handleLogout}
@@ -809,15 +707,13 @@ export default function App() {
         {currentRoute === 'login' && (
           <LoginRegisterView
             onLoginSuccess={handleAuthSuccess}
-            onLoginAs={handleSwitchUser}
-            onRegisterUser={handleRegisterUser}
             onNavigate={handleNavigate}
           />
         )}
 
         {currentRoute === 'dashboard' && (
           <DashboardView
-            currentUser={currentUser}
+            currentUser={effectiveUser}
             datasets={datasets}
             queryHistory={queryHistory}
             transactions={transactions}
@@ -829,7 +725,7 @@ export default function App() {
         {currentRoute === 'marketplace' && (
           <MarketplaceView
             datasets={datasets}
-            currentUser={currentUser}
+            currentUser={effectiveUser}
             onSelectDatasetForDetail={handleOpenDetail}
             onNavigate={handleNavigate}
             onDatasetsLoaded={(fresh) => {
@@ -848,7 +744,7 @@ export default function App() {
         {currentRoute === 'dataset-detail' && (
           <DatasetDetailView
             dataset={activeDataset}
-            currentUser={currentUser}
+            currentUser={effectiveUser}
             onNavigate={handleNavigate}
             onOpenQueryWithPrompt={handleOpenQueryWorkspace}
             onImproveDataset={handleOpenImprove}
@@ -857,7 +753,7 @@ export default function App() {
 
         {currentRoute === 'upload' && (
           <UploadWizardView
-            currentUser={currentUser}
+            currentUser={effectiveUser}
             onPublishDataset={handlePublishDataset}
             onNavigate={handleNavigate}
           />
@@ -865,26 +761,26 @@ export default function App() {
 
         {currentRoute === 'query' && (
           <QueryWorkspaceView
-            currentUser={currentUser}
+            currentUser={effectiveUser}
             datasets={datasets}
             selectedDatasetId={selectedDatasetId}
             onSelectDataset={setSelectedDatasetId}
             initialPrompt={workspaceInitialPrompt}
             onExecuteQuery={handleExecuteQuery}
-            sessionHistory={queryHistory.filter((q) => q.userId === currentUser.id)}
+            sessionHistory={queryHistory.filter((q) => q.userId === effectiveUser.id)}
           />
         )}
 
         {currentRoute === 'query-history' && (
           <QueryHistoryView
             history={queryHistory}
-            currentUserId={currentUser.id}
+            currentUserId={effectiveUser.id}
           />
         )}
 
         {currentRoute === 'my-datasets' && (
           <MyDatasetsView
-            currentUser={currentUser}
+            currentUser={effectiveUser}
             datasets={datasets}
             onNavigate={handleNavigate}
             onSelectDatasetForDetail={handleOpenDetail}
@@ -895,7 +791,7 @@ export default function App() {
 
         {currentRoute === 'versions-improve' && (
           <VersionsImproveView
-            currentUser={currentUser}
+            currentUser={effectiveUser}
             datasets={datasets}
             selectedDatasetId={selectedDatasetId}
             onSelectDataset={setSelectedDatasetId}
@@ -905,30 +801,19 @@ export default function App() {
 
         {currentRoute === 'wallet' && (
           <WalletView
-            currentUser={currentUser}
+            currentUser={effectiveUser}
             transactions={transactions}
             onRedeemCredits={handleRedeemCredits}
             onTopUpCredits={handleTopUpCredits}
             onBalanceUpdated={(newBal) => {
-              setUsers((prev) => {
-                const u = prev[currentUser.id];
-                if (!u) return prev;
-                return {
-                  ...prev,
-                  [currentUser.id]: {
-                    ...u,
-                    credits: newBal,
-                  },
-                };
-              });
+              setCurrentUser((prev) => (prev ? { ...prev, credits: newBal } : null));
             }}
           />
         )}
 
         {currentRoute === 'profile' && (
           <ProfileView
-            currentUser={currentUser}
-            allUsers={users}
+            currentUser={effectiveUser}
             onSwitchUser={handleSwitchUser}
             datasets={datasets}
             queryHistory={queryHistory}

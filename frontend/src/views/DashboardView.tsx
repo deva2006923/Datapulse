@@ -119,7 +119,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               Credit balance
             </span>
             <span className="text-2xl font-black font-mono text-emerald-600">
-              {ledgerBalance.toLocaleString()} cr
+              {currentUser.credits.toLocaleString()} cr
             </span>
           </div>
           <button

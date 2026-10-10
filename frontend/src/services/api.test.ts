@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'bun:test';
-import { api, ApiError, API_BASE_URL, getStoredToken, setStoredToken, clearStoredToken } from './api';
+import { api, ApiError, API_BASE_URL, getStoredToken, setStoredToken, clearStoredToken, DEMO_ACCOUNTS } from './api';
 
 // Polyfill localStorage if necessary in test environment
 if (typeof globalThis.localStorage === 'undefined') {
@@ -159,16 +159,43 @@ describe('Live Backend Authentication Integration', () => {
     expect(getStoredToken()).toBeNull();
   });
 
-  it('supports instant demo login against real backend', async () => {
-    const demoRes = await api.auth.demoLogin('demo-user');
-    expect(demoRes).toBeDefined();
-    expect(demoRes.access_token).toBeDefined();
-    expect(demoRes.user.email).toBe('demo@datapulse.io');
-    expect(getStoredToken()).toBe(demoRes.access_token);
+  it('supports instant demo login against real backend for all defined demo accounts', async () => {
+    for (const [key, expected] of Object.entries(DEMO_ACCOUNTS)) {
+      const demoRes = await api.auth.demoLogin(key);
+      expect(demoRes).toBeDefined();
+      expect(demoRes.access_token).toBeDefined();
+      expect(demoRes.user.email).toBe(expected.email);
+      expect(demoRes.user.full_name).toBe(expected.full_name);
+      expect(getStoredToken()).toBe(demoRes.access_token);
 
-    // Verify authenticated user
+      // Verify authenticated user from authoritative /auth/me
+      const me = await api.auth.getMe();
+      expect(me.email).toBe(expected.email);
+      expect(me.full_name).toBe(expected.full_name);
+      expect(typeof me.credits).toBe('number');
+    }
+  });
+
+  it('rejects demo login with arbitrary or generated user IDs to prevent session corruption', async () => {
+    const invalidKeys = ['usr_4cf1c696e1ba', 'user_1728591234', 'fake_account', ''];
+    for (const key of invalidKeys) {
+      try {
+        await api.auth.demoLogin(key);
+        expect(true).toBe(false); // Should throw ApiError
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(ApiError);
+        expect(err.status).toBe(400);
+        expect(err.message).toContain('Invalid demo account key');
+      }
+    }
+  });
+
+  it('ensures /auth/me is the authoritative single source of truth for credit balance', async () => {
+    const demoRes = await api.auth.demoLogin('demo-user');
     const me = await api.auth.getMe();
-    expect(me.email).toBe('demo@datapulse.io');
+    expect(me.id).toBe(demoRes.user.id);
+    expect(me.credits).toBe(demoRes.user.credits);
+    expect(me.credits).toBeGreaterThanOrEqual(0);
   });
 });
 
