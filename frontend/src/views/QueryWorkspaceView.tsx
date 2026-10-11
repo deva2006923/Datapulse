@@ -20,6 +20,14 @@ import {
   Layers,
 } from 'lucide-react';
 import { AppDataset, UserAccount, QueryHistoryItem } from '../types';
+import {
+  recommendVisualization,
+  VisualizationRecommendation,
+} from '../services/visualizationAnalyzer';
+import {
+  RecommendationBanner,
+  QueryChart,
+} from '../components/QueryVisualizer';
 
 interface QueryWorkspaceViewProps {
   currentUser: UserAccount;
@@ -70,6 +78,7 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
   const [recordsAnalyzed, setRecordsAnalyzed] = useState<number | null>(null);
   const [matchingDatasets, setMatchingDatasets] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<'table' | 'chart'>('table');
+  const [recommendation, setRecommendation] = useState<VisualizationRecommendation | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionTime, setExecutionTime] = useState<number | null>(null);
   const [copiedSql, setCopiedSql] = useState(false);
@@ -129,13 +138,19 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
         setRecordsAnalyzed(res.recordsAnalyzed ?? null);
         setMatchingDatasets(res.matchingDatasets || []);
 
+        let detectedCols: string[] = [];
         if (res.columns && res.columns.length > 0) {
-          setColumns(res.columns);
+          detectedCols = res.columns;
         } else if (res.rows.length > 0) {
-          setColumns(Object.keys(res.rows[0]));
-        } else {
-          setColumns([]);
+          detectedCols = Object.keys(res.rows[0]);
         }
+        setColumns(detectedCols);
+
+        // Run local deterministic profiler to recommend visualization without extra queries or credits
+        const rec = recommendVisualization(detectedCols, res.rows, prompt);
+        setRecommendation(rec);
+        // Requirement 2: Keep the actual query results table as the default view
+        setViewMode('table');
       },
       (err) => {
         setIsExecuting(false);
@@ -446,6 +461,22 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
         </div>
       )}
 
+      {/* AI-Assisted Recommended Visualization Banner */}
+      {results && results.length > 0 && recommendation && (
+        <RecommendationBanner
+          recommendation={recommendation}
+          viewMode={viewMode}
+          onApplyRecommendation={(type) => {
+            if (type === 'table') {
+              setViewMode('table');
+            } else {
+              setViewMode('chart');
+            }
+          }}
+          onSetPrompt={(newPrompt) => setPrompt(newPrompt)}
+        />
+      )}
+
       {/* Query Result Workspace (Table / Chart Toggle & CSV Export) */}
       {results && results.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm space-y-0">
@@ -466,6 +497,7 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
               {/* Toggle Table vs Chart */}
               <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5">
                 <button
+                  type="button"
                   onClick={() => setViewMode('table')}
                   className={`px-3 py-1 rounded text-xs font-medium cursor-pointer transition-colors flex items-center gap-1.5 ${
                     viewMode === 'table'
@@ -477,6 +509,7 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
                   <span>Table</span>
                 </button>
                 <button
+                  type="button"
                   onClick={() => setViewMode('chart')}
                   className={`px-3 py-1 rounded text-xs font-medium cursor-pointer transition-colors flex items-center gap-1.5 ${
                     viewMode === 'chart'
@@ -491,6 +524,7 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
 
               {/* Export to CSV */}
               <button
+                type="button"
                 onClick={handleExportCsv}
                 className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-medium transition-colors shadow-xs cursor-pointer flex items-center gap-1.5"
               >
@@ -500,7 +534,7 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
             </div>
           </div>
 
-          {/* Table View */}
+          {/* Table View (Default) */}
           {viewMode === 'table' ? (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs font-mono">
@@ -527,47 +561,17 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
               </table>
             </div>
           ) : (
-            /* Bar Chart View */
-            <div className="p-6 space-y-4">
-              <span className="text-xs text-slate-500 block">
-                Visualizing top records from analytical query output.
-              </span>
-              <div className="space-y-3">
-                {results.slice(0, 8).map((row, idx) => {
-                  const labelKey = columns[0] || 'id';
-                  const valKey = columns.find(
-                    (c) => typeof row[c] === 'number'
-                  ) || columns[1] || columns[0];
-                  const label = String(row[labelKey] ?? `Item ${idx + 1}`);
-                  const val = Number(row[valKey]) || (idx + 1) * 10;
-                  const maxRowVal = Math.max(
-                    ...results.map((r) => Number(r[valKey]) || 1)
-                  );
-                  const pct = Math.min(
-                    100,
-                    Math.round((val / (maxRowVal || 1)) * 100)
-                  );
-
-                  return (
-                    <div key={idx} className="space-y-1">
-                      <div className="flex justify-between text-xs">
-                        <span className="font-semibold text-slate-700 truncate max-w-xs">
-                          {label}
-                        </span>
-                        <span className="font-mono text-indigo-700 font-bold">
-                          {val.toLocaleString()}
-                        </span>
-                      </div>
-                      <div className="w-full bg-slate-100 rounded-full h-2">
-                        <div
-                          className="bg-indigo-600 h-2 rounded-full"
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+            /* Multi-Type Dynamic Chart View with Axis Selectors & Aggregation Safeguards */
+            <div className="p-4 sm:p-6">
+              <QueryChart
+                results={results}
+                columns={columns}
+                recommendation={
+                  recommendation || recommendVisualization(columns, results, prompt)
+                }
+                onSetPrompt={(p) => setPrompt(p)}
+                onSwitchToTable={() => setViewMode('table')}
+              />
             </div>
           )}
         </div>
