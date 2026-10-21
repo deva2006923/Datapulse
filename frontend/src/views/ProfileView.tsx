@@ -56,6 +56,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 <span className="px-2.5 py-0.5 rounded text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
                   {currentUser.role}
                 </span>
+                <span className="px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  Reputation: {currentUser.reputationScore ?? 50}/100
+                </span>
               </div>
               <p className="text-xs text-slate-500 font-mono flex items-center gap-1.5">
                 <Mail className="w-3.5 h-3.5 text-slate-400" />

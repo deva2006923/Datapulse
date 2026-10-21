@@ -19,11 +19,13 @@ interface LoginRegisterViewProps {
     role?: 'Contributor' | 'Data Analyst'
   ) => void;
   onNavigate: (route: PageRoute) => void;
+  isAuthenticated?: boolean;
 }
 
 export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
   onLoginSuccess,
   onNavigate,
+  isAuthenticated = false,
 }) => {
   const [isRegister, setIsRegister] = useState(false);
   const [name, setName] = useState('');
@@ -33,13 +35,19 @@ export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Redirect authenticated user away from login/register view
+  React.useEffect(() => {
+    if (isAuthenticated || !!api.auth.getToken()) {
+      onNavigate('dashboard');
+    }
+  }, [isAuthenticated, onNavigate]);
+
   const handleDemoClick = async (demoKey: string) => {
     setIsLoading(true);
     setErrorMessage(null);
     try {
       const res = await api.auth.demoLogin(demoKey);
       onLoginSuccess(res.user, res.access_token);
-      onNavigate('dashboard');
     } catch (err: any) {
       if (err instanceof ApiError) {
         setErrorMessage(err.message);
@@ -77,7 +85,6 @@ export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
           full_name: name.trim(),
         });
         onLoginSuccess(res.user, res.access_token, role);
-        onNavigate('dashboard');
       } catch (err: any) {
         if (err instanceof ApiError) {
           setErrorMessage(err.message);
@@ -104,7 +111,6 @@ export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
           password,
         });
         onLoginSuccess(res.user, res.access_token);
-        onNavigate('dashboard');
       } catch (err: any) {
         if (err instanceof ApiError) {
           setErrorMessage(err.message);

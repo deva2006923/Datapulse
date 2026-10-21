@@ -7,6 +7,10 @@ from typing import Dict, Any, Tuple
 from app.database import get_db_connection
 
 from app.services.storage import sanitize_headers
+from app.services.pricing import calculate_dataset_unlock_price
+from app.services.reputation import sync_and_get_user_reputation
+
+BASIC_UPLOAD_REWARD = 50
 
 def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict[str, Any]:
     """
@@ -14,7 +18,7 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
     - schema fidelity
     - completeness
     - domain relevance
-    - overall score and credits awarded
+    - overall score, credits awarded (basic + quality), and dynamic unlock price
     """
     if not csv_content or not csv_content.strip():
         return {
@@ -23,8 +27,11 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
             "rows_count": 0,
             "columns_count": 0,
             "schema": {},
-            "scores": (0.0, 0.0, 0.0, 0.0, 0, 0),
-            "cleaned_csv": ""
+            "scores": (0.0, 0.0, 0.0, 0.0, 0.0, 0, 5),
+            "cleaned_csv": "",
+            "unlock_price": 5,
+            "basic_reward": 0,
+            "quality_reward": 0
         }
 
     try:
@@ -38,8 +45,11 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
             "rows_count": 0,
             "columns_count": 0,
             "schema": {},
-            "scores": (0.0, 0.0, 0.0, 0.0, 0, 0),
-            "cleaned_csv": ""
+            "scores": (0.0, 0.0, 0.0, 0.0, 0.0, 0, 5),
+            "cleaned_csv": "",
+            "unlock_price": 5,
+            "basic_reward": 0,
+            "quality_reward": 0
         }
     except Exception as e:
         return {
@@ -48,8 +58,11 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
             "rows_count": 0,
             "columns_count": 0,
             "schema": {},
-            "scores": (0.0, 0.0, 0.0, 0.0, 0, 0),
-            "cleaned_csv": ""
+            "scores": (0.0, 0.0, 0.0, 0.0, 0.0, 0, 5),
+            "cleaned_csv": "",
+            "unlock_price": 5,
+            "basic_reward": 0,
+            "quality_reward": 0
         }
     
     try:
@@ -61,8 +74,11 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
             "rows_count": 0,
             "columns_count": 0,
             "schema": {},
-            "scores": (0.0, 0.0, 0.0, 0.0, 0, 0),
-            "cleaned_csv": ""
+            "scores": (0.0, 0.0, 0.0, 0.0, 0.0, 0, 5),
+            "cleaned_csv": "",
+            "unlock_price": 5,
+            "basic_reward": 0,
+            "quality_reward": 0
         }
 
     total_rows = len(rows)
@@ -75,8 +91,11 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
             "rows_count": total_rows,
             "columns_count": total_cols,
             "schema": {h: "string" for h in header},
-            "scores": (0.0, 0.0, 0.0, 0.0, 0, 0),
-            "cleaned_csv": ""
+            "scores": (0.0, 0.0, 0.0, 0.0, 0.0, 0, 5),
+            "cleaned_csv": "",
+            "unlock_price": 5,
+            "basic_reward": 0,
+            "quality_reward": 0
         }
         
     # Sanitize and deduplicate column names
@@ -123,8 +142,21 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
     overall_score = round((0.4 * completeness_score) + (0.35 * schema_fidelity_score) + (0.25 * domain_relevance_score), 2)
     quality_score = overall_score
     
-    # Credits calculation: 50 base + up to 50 for high quality
-    credits_awarded = int(50 + (overall_score / 2.0))
+    # Documented & configurable rewards:
+    # 1. Basic Upload Reward: 50 credits base for accepted upload
+    # 2. Quality Reward: up to 50 credits based on actual overall score (50% of score)
+    basic_reward = BASIC_UPLOAD_REWARD
+    quality_reward = int(round(overall_score * 0.50))
+    credits_awarded = basic_reward + quality_reward
+
+    # Deterministic dataset unlock price
+    unlock_price = calculate_dataset_unlock_price(
+        quality_score=quality_score,
+        completeness_score=completeness_score,
+        domain_relevance_score=domain_relevance_score,
+        rows_count=total_rows,
+        columns_count=total_cols
+    )
     
     return {
         "valid": True,
@@ -132,8 +164,11 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
         "rows_count": total_rows,
         "columns_count": total_cols,
         "schema": schema,
-        "scores": (quality_score, schema_fidelity_score, completeness_score, domain_relevance_score, overall_score, credits_awarded),
-        "cleaned_csv": cleaned_csv
+        "scores": (quality_score, schema_fidelity_score, completeness_score, domain_relevance_score, overall_score, credits_awarded, unlock_price),
+        "cleaned_csv": cleaned_csv,
+        "unlock_price": unlock_price,
+        "basic_reward": basic_reward,
+        "quality_reward": quality_reward
     }
 
 def run_evaluation_pipeline(evaluation_id: str, dataset_id: str, csv_content: str, filename: str, domain: str, user_id: str):
@@ -150,10 +185,14 @@ def run_evaluation_pipeline(evaluation_id: str, dataset_id: str, csv_content: st
             SET status = 'failed', progress = 100, error_message = ?, updated_at = ?
             WHERE id = ?
         """, (res["error"], now, evaluation_id))
+        sync_and_get_user_reputation(user_id, conn)
         conn.commit()
         return
         
-    quality, fidelity, completeness, relevance, overall, credits = res["scores"]
+    quality, fidelity, completeness, relevance, overall, credits = res["scores"][:6]
+    unlock_price = res.get("unlock_price", 10)
+    basic_reward = res.get("basic_reward", BASIC_UPLOAD_REWARD)
+    quality_reward = res.get("quality_reward", credits - basic_reward)
     
     cursor.execute("""
         UPDATE evaluations
@@ -163,14 +202,29 @@ def run_evaluation_pipeline(evaluation_id: str, dataset_id: str, csv_content: st
         WHERE id = ?
     """, (quality, fidelity, completeness, relevance, overall, credits, now, evaluation_id))
     
-    # Award credits to user
+    # Persist dataset-specific unlock price in datasets table
+    cursor.execute("UPDATE datasets SET unlock_price = ? WHERE id = ?", (unlock_price, dataset_id))
+
+    # Award credits atomically to user
     cursor.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (credits, user_id))
     
-    # Record transaction
-    tx_id = f"tx_{uuid.uuid4().hex[:12]}"
+    # Record basic upload reward in persistent credit transactions ledger
+    tx_base = f"tx_{uuid.uuid4().hex[:12]}"
     cursor.execute("""
         INSERT INTO credit_transactions (id, user_id, amount, transaction_type, description, status, created_at)
-        VALUES (?, ?, ?, 'reward', ?, 'completed', ?)
-    """, (tx_id, user_id, credits, f"Awarded for dataset {filename} evaluation", now))
+        VALUES (?, ?, ?, 'upload_reward', ?, 'completed', ?)
+    """, (tx_base, user_id, basic_reward, f"Basic upload reward for dataset '{filename}' ({dataset_id})", now))
+    
+    # Record quality evaluation reward if earned
+    if quality_reward > 0:
+        tx_qual = f"tx_{uuid.uuid4().hex[:12]}"
+        cursor.execute("""
+            INSERT INTO credit_transactions (id, user_id, amount, transaction_type, description, status, created_at)
+            VALUES (?, ?, ?, 'quality_reward', ?, 'completed', ?)
+        """, (tx_qual, user_id, quality_reward, f"Quality reward ({overall:.1f}% overall score) for dataset '{filename}' ({dataset_id})", now))
+
+    # Recalculate dynamic user reputation score from authoritative records
+    sync_and_get_user_reputation(user_id, conn)
     
     conn.commit()
+

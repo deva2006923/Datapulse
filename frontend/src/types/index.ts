@@ -30,6 +30,7 @@ export interface BackendUserResponse {
   email: string;
   full_name: string;
   credits: number;
+  reputation_score?: number;
   created_at: string;
 }
 
@@ -50,12 +51,15 @@ export interface BackendDatasetDetail {
   schema_metadata?: Record<string, string>;
   schema_json?: Record<string, string>;
   content_summary: string;
+  unlock_price?: number;
+  unlocked_by?: string[];
   created_at: string;
   quality_score?: number;
   domain_relevance_score?: number;
   overall_score?: number;
   credits_awarded?: number;
 }
+
 
 export interface BackendEvaluationResponse {
   id: string;
@@ -97,6 +101,7 @@ export interface SearchItem {
   score: number;
   summary: string;
   rows_count: number;
+  unlock_price?: number;
 }
 
 export interface SearchResponse {
@@ -158,10 +163,38 @@ export interface UserStatsResponse {
   user_id: string;
   email: string;
   credits_balance: number;
+  reputation_score?: number;
   datasets_uploaded: number;
   total_evaluations_completed: number;
   average_quality_score: number;
   recent_transactions: TransactionItem[];
+}
+
+export interface DatasetUnlockResponse {
+  dataset_id: string;
+  unlocked: boolean;
+  already_unlocked: boolean;
+  credits_charged: number;
+  remaining_balance: number;
+  message: string;
+}
+
+export interface DatasetImproveRequest {
+  new_quality_score: number;
+  new_relevance_score: number;
+  changes_summary: string;
+}
+
+export interface DatasetImproveResponse {
+  dataset_id: string;
+  version: string;
+  previous_overall_score: number;
+  new_overall_score: number;
+  delta_score: number;
+  improvement_credits_awarded: number;
+  new_reputation_score: number;
+  changes_summary: string;
+  created_at: string;
 }
 
 export interface ColumnDefinition {
@@ -193,6 +226,7 @@ export interface AppDataset {
   authorId: string;
   authorName: string;
   cost: number; // typically 20 credits
+  unlockPrice?: number;
   qualityScore: number; // 0 - 100
   relevanceScore: number; // 0 - 100
   overallScore: number; // (qualityScore + relevanceScore) / 2
@@ -218,6 +252,7 @@ export interface AppDataset {
   sampleQueries: string[];
   matchScore?: number;
 }
+
 
 export interface WalletTransaction {
   id: string;
@@ -248,6 +283,14 @@ export interface QueryHistoryItem {
   creditsCharged: number;
   timestamp: string;
   executionTimeMs: number;
+}
+
+export interface QueryHistoryResponse {
+  items: QueryHistoryItem[];
+  total: number;
+  page: number;
+  limit: number;
+  has_more: boolean;
 }
 
 export interface ToastMessage {

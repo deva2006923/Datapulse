@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, model_validator
 
 
 # Health Check Schema
@@ -25,6 +25,7 @@ class UserResponse(BaseModel):
     email: str
     full_name: str
     credits: int
+    reputation_score: int = Field(default=50, description="Persisted user reputation score (0-100)")
     created_at: str
 
 class AuthTokenResponse(BaseModel):
@@ -46,7 +47,14 @@ class DatasetDetailResponse(BaseModel):
     columns_count: int
     schema_metadata: Dict[str, Any] = Field(default_factory=dict, alias="schema_json")
     content_summary: str
+    unlock_price: int = Field(default=10, description="Dataset-specific one-time marketplace unlock price")
+    unlocked_by: List[str] = Field(default_factory=list, description="User IDs that have unlocked this dataset")
     created_at: str
+    quality_score: Optional[float] = None
+    domain_relevance_score: Optional[float] = None
+    overall_score: Optional[float] = None
+    credits_awarded: Optional[int] = None
+
 
 class DatasetListResponse(BaseModel):
     datasets: List[DatasetDetailResponse]
@@ -81,6 +89,7 @@ class SearchItem(BaseModel):
     score: float
     summary: str
     rows_count: int
+    unlock_price: int = Field(default=10, description="Dataset-specific unlock price in credits")
 
 class SearchResponse(BaseModel):
     query: str
@@ -103,6 +112,61 @@ class QueryResponse(BaseModel):
     columns: Optional[List[str]] = Field(default=None, description="Column names returned by the query")
     results: Optional[List[Dict[str, Any]]] = Field(default=None, description="Actual data rows returned from DuckDB")
     credits_charged: Optional[int] = Field(default=None, description="Credits charged for this query")
+
+
+class QueryHistoryItem(BaseModel):
+    id: str
+    user_id: str
+    dataset_id: Optional[str] = None
+    dataset_name: Optional[str] = "Cross-Catalog"
+    natural_prompt: str
+    generated_sql: Optional[str] = None
+    rows_returned: int = 0
+    execution_time_ms: int = 0
+    status: str = "SUCCESS"
+    credits_charged: int = 0
+    timestamp: str
+    error_message: Optional[str] = None
+
+    # Frontend-friendly camelCase fields
+    userId: Optional[str] = None
+    datasetId: Optional[str] = None
+    datasetName: Optional[str] = None
+    naturalPrompt: Optional[str] = None
+    generatedSql: Optional[str] = None
+    rowsReturned: Optional[int] = None
+    executionTimeMs: Optional[int] = None
+    creditsCharged: Optional[int] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def populate_camel_case(self):
+        if self.userId is None:
+            self.userId = self.user_id
+        if self.datasetId is None:
+            self.datasetId = self.dataset_id
+        if self.datasetName is None:
+            self.datasetName = self.dataset_name
+        if self.naturalPrompt is None:
+            self.naturalPrompt = self.natural_prompt
+        if self.generatedSql is None:
+            self.generatedSql = self.generated_sql
+        if self.rowsReturned is None:
+            self.rowsReturned = self.rows_returned
+        if self.executionTimeMs is None:
+            self.executionTimeMs = self.execution_time_ms
+        if self.creditsCharged is None:
+            self.creditsCharged = self.credits_charged
+        return self
+
+
+class QueryHistoryResponse(BaseModel):
+    items: List[QueryHistoryItem]
+    total: int
+    page: int
+    limit: int
+    has_more: bool
 
 
 # Credit & Redemption Schemas
@@ -134,7 +198,35 @@ class UserStatsResponse(BaseModel):
     user_id: str
     email: str
     credits_balance: int
+    reputation_score: int
     datasets_uploaded: int
     total_evaluations_completed: int
     average_quality_score: float
     recent_transactions: List[TransactionItem]
+
+
+# Dataset Unlock & Improvement Schemas
+class DatasetUnlockResponse(BaseModel):
+    dataset_id: str
+    unlocked: bool
+    already_unlocked: bool
+    credits_charged: int
+    remaining_balance: int
+    message: str
+
+class DatasetImproveRequest(BaseModel):
+    new_quality_score: float = Field(ge=0.0, le=100.0, description="Proposed quality score")
+    new_relevance_score: float = Field(ge=0.0, le=100.0, description="Proposed relevance score")
+    changes_summary: str = Field(min_length=5, description="Summary of schema or data enhancements")
+
+class DatasetImproveResponse(BaseModel):
+    dataset_id: str
+    version: str
+    previous_overall_score: float
+    new_overall_score: float
+    delta_score: float
+    improvement_credits_awarded: int
+    new_reputation_score: int
+    changes_summary: str
+    created_at: str
+

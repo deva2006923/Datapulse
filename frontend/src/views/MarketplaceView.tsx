@@ -401,7 +401,7 @@ export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
                       </span>
                     ) : (
                       <span className="text-[11px] font-semibold text-slate-600 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded flex items-center gap-1">
-                        <Lock className="w-3 h-3" /> {ds.cost} cr unlock
+                        <Lock className="w-3 h-3" /> {ds.unlockPrice ?? ds.cost ?? 10} cr unlock
                       </span>
                     )}
                   </div>

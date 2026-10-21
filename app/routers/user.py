@@ -3,6 +3,7 @@ from app.routers import TrailingSlashRouter
 from app.database import get_db_connection
 from app.auth import get_current_user
 from app.schemas import UserStatsResponse, TransactionItem
+from app.services.reputation import sync_and_get_user_reputation
 
 router = TrailingSlashRouter(tags=["User Statistics"])
 
@@ -15,6 +16,9 @@ def get_user_stats(user: dict = Depends(get_current_user)):
     cursor.execute("SELECT credits FROM users WHERE id = ?", (user["id"],))
     u_row = cursor.fetchone()
     current_credits = u_row["credits"] if u_row else user["credits"]
+    
+    # Calculate user reputation
+    reputation = sync_and_get_user_reputation(user["id"], conn)
     
     # Datasets uploaded count
     cursor.execute("SELECT COUNT(*) AS cnt FROM datasets WHERE user_id = ?", (user["id"],))
@@ -57,8 +61,10 @@ def get_user_stats(user: dict = Depends(get_current_user)):
         user_id=user["id"],
         email=user["email"],
         credits_balance=current_credits,
+        reputation_score=reputation,
         datasets_uploaded=ds_count,
         total_evaluations_completed=eval_count,
         average_quality_score=avg_score,
         recent_transactions=transactions
     )
+

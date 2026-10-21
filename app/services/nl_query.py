@@ -272,6 +272,10 @@ def generate_sql(
             if isinstance(e, AIProviderError):
                 raise
             logger.error("Error invoking Gemini model: %s", e)
+            fallback = fallback_rule_sql_generator(question, table_name, columns_with_types)
+            if fallback:
+                logger.info("Fell back to rule generator after Gemini API exception: %s", e)
+                return fallback
             raise AIProviderError(f"AI provider generation failed: {str(e)}")
 
     raise AIProviderError(f"Unsupported AI provider: '{provider}'")

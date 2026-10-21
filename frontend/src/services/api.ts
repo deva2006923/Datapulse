@@ -14,7 +14,13 @@ import {
   UserLoginRequest,
   UserRegisterRequest,
   UserStatsResponse,
+  DatasetUnlockResponse,
+  DatasetImproveRequest,
+  DatasetImproveResponse,
+  QueryHistoryItem,
+  QueryHistoryResponse,
 } from '../types';
+import { backendQueryHistoryItemToQueryHistoryItem } from './datasetAdapter';
 
 const TOKEN_STORAGE_KEY = 'datapulse_auth_token';
 
@@ -386,7 +392,30 @@ export const api = {
         body: JSON.stringify(payload),
       });
     },
+
+    /**
+     * Unlocks a dataset via POST /datasets/:id/unlock (one-time purchase).
+     */
+    async unlock(datasetId: string): Promise<DatasetUnlockResponse> {
+      return request<DatasetUnlockResponse>(`/datasets/${datasetId}/unlock`, {
+        method: 'POST',
+      });
+    },
+
+    /**
+     * Submits version improvements via POST /datasets/:id/improve.
+     */
+    async improve(
+      datasetId: string,
+      data: DatasetImproveRequest
+    ): Promise<DatasetImproveResponse> {
+      return request<DatasetImproveResponse>(`/datasets/${datasetId}/improve`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    },
   },
+
 
   query: {
     /**
@@ -406,6 +435,41 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(payload),
       });
+    },
+
+    /**
+     * Retrieves the authenticated user's isolated query history from GET /query/history.
+     * Guaranteed to only return records belonging to the authenticated user.
+     */
+    async getHistory(params?: {
+      page?: number;
+      limit?: number;
+      status?: string;
+      search?: string;
+    }): Promise<QueryHistoryResponse> {
+      const searchParams = new URLSearchParams();
+      if (params?.page) searchParams.set('page', params.page.toString());
+      if (params?.limit) searchParams.set('limit', params.limit.toString());
+      if (params?.status && params.status !== 'All') searchParams.set('status', params.status);
+      if (params?.search && params.search.trim()) searchParams.set('search', params.search.trim());
+
+      const queryStr = searchParams.toString();
+      const path = `/query/history${queryStr ? `?${queryStr}` : ''}`;
+
+      const response = await request<{
+        items: any[];
+        total: number;
+        page: number;
+        limit: number;
+        has_more: boolean;
+      }>(path, {
+        method: 'GET',
+      });
+
+      return {
+        ...response,
+        items: (response.items || []).map(backendQueryHistoryItemToQueryHistoryItem),
+      };
     },
   },
 

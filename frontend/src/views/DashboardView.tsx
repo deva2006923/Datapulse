@@ -84,11 +84,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     .map((pt, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(pt.spent)}`)
     .join(' ');
 
-  // Reputation circular gauge values
-  const repScore = currentUser.reputationScore || 94;
+  // Reputation circular gauge values (dynamic derived score from authoritative backend data)
+  const repScore = typeof currentUser.reputationScore === 'number' ? currentUser.reputationScore : 50;
   const radius = 30;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (repScore / 100) * circumference;
+
 
   return (
     <div className="space-y-6">
@@ -372,8 +373,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
             </div>
 
-            <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded mt-3">
-              Excellent Contributor Standing
+            <span className={`text-xs font-semibold px-2 py-0.5 rounded mt-3 ${
+              repScore >= 80 ? 'text-emerald-600 bg-emerald-50 border border-emerald-200' :
+              repScore >= 50 ? 'text-indigo-600 bg-indigo-50 border border-indigo-200' :
+              'text-amber-700 bg-amber-50 border border-amber-200'
+            }`}>
+              {repScore >= 80 ? 'Excellent Contributor Standing' :
+               repScore >= 50 ? 'Good Contributor Standing' :
+               'Building Contributor Standing'}
             </span>
           </div>
 

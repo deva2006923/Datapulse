@@ -5,6 +5,7 @@ from app.routers import TrailingSlashRouter
 from app.database import get_db_connection
 from app.schemas import UserRegisterRequest, UserLoginRequest, AuthTokenResponse, UserResponse
 from app.auth import hash_password, verify_password, create_access_token, get_current_user
+from app.services.reputation import sync_and_get_user_reputation, DEFAULT_INITIAL_REPUTATION
 
 router = TrailingSlashRouter(tags=["Authentication"])
 
@@ -25,11 +26,12 @@ def register(req: UserRegisterRequest):
     pwd_hash = hash_password(req.password)
     now = datetime.datetime.utcnow().isoformat()
     initial_credits = 100
+    initial_reputation = DEFAULT_INITIAL_REPUTATION
     
     cursor.execute("""
-        INSERT INTO users (id, email, password_hash, full_name, credits, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (user_id, req.email, pwd_hash, req.full_name, initial_credits, now))
+        INSERT INTO users (id, email, password_hash, full_name, credits, reputation_score, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, req.email, pwd_hash, req.full_name, initial_credits, initial_reputation, now))
     
     # Welcome bonus transaction
     tx_id = f"tx_{uuid.uuid4().hex[:12]}"
@@ -49,6 +51,7 @@ def register(req: UserRegisterRequest):
             email=req.email,
             full_name=req.full_name,
             credits=initial_credits,
+            reputation_score=initial_reputation,
             created_at=now
         )
     )
@@ -69,6 +72,7 @@ def login(req: UserLoginRequest):
         
     user_id = row["id"]
     token = create_access_token(user_id)
+    rep_score = sync_and_get_user_reputation(user_id, conn)
     
     return AuthTokenResponse(
         access_token=token,
@@ -78,6 +82,7 @@ def login(req: UserLoginRequest):
             email=row["email"],
             full_name=row["full_name"],
             credits=row["credits"],
+            reputation_score=rep_score,
             created_at=row["created_at"]
         )
     )
@@ -85,10 +90,20 @@ def login(req: UserLoginRequest):
 @router.get("/auth/me", response_model=UserResponse)
 @router.get("/me", response_model=UserResponse)
 def get_me(user: dict = Depends(get_current_user)):
+    conn = get_db_connection()
+    rep_score = sync_and_get_user_reputation(user["id"], conn)
+    # Refresh current user credit balance from database
+    cursor = conn.cursor()
+    cursor.execute("SELECT credits FROM users WHERE id = ?", (user["id"],))
+    u_row = cursor.fetchone()
+    current_credits = u_row["credits"] if u_row else user["credits"]
+    
     return UserResponse(
         id=user["id"],
         email=user["email"],
         full_name=user["full_name"],
-        credits=user["credits"],
+        credits=current_credits,
+        reputation_score=rep_score,
         created_at=user["created_at"]
     )
+

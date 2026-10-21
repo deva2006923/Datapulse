@@ -6,6 +6,7 @@ import {
   SearchItem,
   TransactionItem,
   WalletTransaction,
+  QueryHistoryItem,
 } from '../types';
 
 /**
@@ -51,6 +52,11 @@ export function backendDatasetToAppDataset(
     ? backend.domain.charAt(0).toUpperCase() + backend.domain.slice(1)
     : 'General';
 
+  const unlockPrice = backend.unlock_price ?? 10;
+  const unlockedList = Array.from(
+    new Set([...(backend.unlocked_by || []), ...(isOwner ? [backend.user_id] : [])])
+  );
+
   return {
     id: backend.id,
     name: backend.filename || `${backend.id}.csv`,
@@ -62,7 +68,8 @@ export function backendDatasetToAppDataset(
     format: 'csv',
     authorId: backend.user_id,
     authorName: isOwner ? 'You' : 'Dataset Contributor',
-    cost: isOwner ? 0 : 1, // Backend QUERY_COST is 1, and 0 for own dataset
+    cost: isOwner ? 0 : unlockPrice,
+    unlockPrice,
     qualityScore,
     relevanceScore,
     overallScore,
@@ -94,7 +101,7 @@ export function backendDatasetToAppDataset(
         changesSummary: backend.content_summary || 'Initial dataset ingestion and automated evaluation.',
       },
     ],
-    unlockedBy: isOwner ? [backend.user_id] : [],
+    unlockedBy: unlockedList,
     sampleQueries: [
       `How many rows are in this dataset?`,
       `Show sample records from ${backend.name || 'this dataset'}`,
@@ -113,6 +120,7 @@ export function searchItemToAppDataset(
   const formattedDomain = item.domain
     ? item.domain.charAt(0).toUpperCase() + item.domain.slice(1)
     : 'General';
+  const unlockPrice = item.unlock_price ?? 10;
 
   return {
     id: item.dataset_id,
@@ -123,7 +131,8 @@ export function searchItemToAppDataset(
     format: 'csv',
     authorId: '',
     authorName: 'Dataset Contributor',
-    cost: 1,
+    cost: unlockPrice,
+    unlockPrice,
     qualityScore: Math.min(100, Math.max(0, matchPct)),
     relevanceScore: Math.min(100, Math.max(0, matchPct)),
     overallScore: Math.min(100, Math.max(0, matchPct)),
@@ -163,13 +172,20 @@ export function transactionItemToWalletTransaction(
       mappedType = 'SIGNUP_BONUS';
       break;
     case 'reward':
+    case 'upload_reward':
+    case 'quality_reward':
       mappedType = 'UPLOAD_REWARD';
       break;
     case 'query_fee':
+    case 'dataset_unlock':
       mappedType = 'QUERY_CHARGE';
       break;
     case 'query_reward':
+    case 'unlock_royalty':
       mappedType = 'CONTRIBUTOR_ROYALTY';
+      break;
+    case 'improvement_reward':
+      mappedType = 'IMPROVEMENT_REWARD';
       break;
     case 'redeem':
       mappedType = 'REDEMPTION';
@@ -192,3 +208,27 @@ export function transactionItemToWalletTransaction(
     rupeeValue: Math.abs((item.amount / 100) * 10),
   };
 }
+
+/**
+ * Transforms a backend query history record into the frontend QueryHistoryItem model.
+ */
+export function backendQueryHistoryItemToQueryHistoryItem(item: any): QueryHistoryItem {
+  return {
+    id: item.id,
+    userId: item.user_id || item.userId || '',
+    datasetId: item.dataset_id || item.datasetId || '',
+    datasetName: item.dataset_name || item.datasetName || 'Cross-Catalog',
+    naturalPrompt: item.natural_prompt || item.naturalPrompt || item.query_text || '',
+    generatedSql: item.generated_sql || item.generatedSql || '-- No SQL generated',
+    rowsReturned: item.rows_returned ?? item.rowsReturned ?? item.result_count ?? 0,
+    status: (item.status as any) || 'SUCCESS',
+    creditsCharged: item.credits_charged ?? item.creditsCharged ?? 0,
+    timestamp: item.timestamp
+      ? item.timestamp.replace('T', ' ').substring(0, 19)
+      : item.created_at
+      ? item.created_at.replace('T', ' ').substring(0, 19)
+      : new Date().toISOString().replace('T', ' ').substring(0, 19),
+    executionTimeMs: item.execution_time_ms ?? item.executionTimeMs ?? 0,
+  };
+}
+

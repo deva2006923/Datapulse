@@ -19,6 +19,7 @@ interface DatasetDetailViewProps {
   onNavigate: (route: PageRoute) => void;
   onOpenQueryWithPrompt?: (datasetId: string, prompt?: string) => void;
   onImproveDataset: (datasetId: string) => void;
+  onUnlockDataset?: (datasetId: string) => Promise<void> | void;
 }
 
 export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
@@ -27,9 +28,11 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
   onNavigate,
   onOpenQueryWithPrompt,
   onImproveDataset,
+  onUnlockDataset,
 }) => {
   const [dataset, setDataset] = useState<AppDataset>(initialDataset);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isUnlocking, setIsUnlocking] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const fetchDatasetDetails = async (datasetId: string) => {
@@ -82,6 +85,19 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
 
   const isOwner = dataset.authorId === currentUser.id;
   const isUnlocked = isOwner || dataset.unlockedBy.includes(currentUser.id);
+
+  const handleUnlock = async () => {
+    if (!onUnlockDataset || isUnlocking) return;
+    setIsUnlocking(true);
+    try {
+      await onUnlockDataset(dataset.id);
+      await fetchDatasetDetails(dataset.id);
+    } catch {
+      // toast shown in App.tsx
+    } finally {
+      setIsUnlocking(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -164,7 +180,7 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
                 </span>
               ) : (
                 <span className="px-2.5 py-0.5 rounded text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200 flex items-center gap-1">
-                  <Lock className="w-3 h-3" /> Locked ({dataset.cost || 1} cr)
+                  <Lock className="w-3 h-3" /> Locked ({dataset.unlockPrice ?? dataset.cost ?? 10} cr)
                 </span>
               )}
             </div>
@@ -322,25 +338,51 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
           </div>
           <div>
             <h3 className="text-sm font-bold text-slate-900">
-              {isOwner ? 'Dataset Contributor Access' : isUnlocked ? 'Dataset Access Unlocked' : 'Unlock Policy: 1 Compute Credit'}
+              {isOwner
+                ? 'Dataset Contributor Access'
+                : isUnlocked
+                ? 'Dataset Access Unlocked'
+                : `Dataset Unlock Price: ${dataset.unlockPrice ?? dataset.cost ?? 10} Credits`}
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
               {isOwner
                 ? 'As the author, you have permanent unrestricted query access at 0 credits.'
                 : isUnlocked
-                ? 'You have access to this dataset. Standard queries charged per backend policy.'
-                : 'Query fee is 1 credit per paid query. The original contributor receives 1 credit royalty reward.'}
+                ? 'You have permanent unlocked access to this dataset. Standard analytical queries are charged at 1 credit per query, with royalty rewards attributed to the contributor.'
+                : `One-time dataset unlock price is ${dataset.unlockPrice ?? dataset.cost ?? 10} credits (determined deterministically by dataset quality, schema completeness, and row volume). Standard analytical queries are charged at 1 credit per query.`}
             </p>
           </div>
         </div>
 
-        <button
-          onClick={() => onOpenQueryWithPrompt?.(dataset.id)}
-          className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors whitespace-nowrap self-start sm:self-auto flex items-center gap-1.5"
-        >
-          <Search className="w-3.5 h-3.5" />
-          <span>Launch Query Workspace</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          {!isOwner && !isUnlocked && onUnlockDataset && (
+            <button
+              onClick={handleUnlock}
+              disabled={isUnlocking}
+              className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors whitespace-nowrap flex items-center gap-1.5"
+            >
+              {isUnlocking ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Unlocking...</span>
+                </>
+              ) : (
+                <>
+                  <Unlock className="w-3.5 h-3.5" />
+                  <span>Unlock Dataset ({dataset.unlockPrice ?? dataset.cost ?? 10} cr)</span>
+                </>
+              )}
+            </button>
+          )}
+
+          <button
+            onClick={() => onOpenQueryWithPrompt?.(dataset.id)}
+            className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors whitespace-nowrap flex items-center gap-1.5"
+          >
+            <Search className="w-3.5 h-3.5" />
+            <span>Launch Query Workspace</span>
+          </button>
+        </div>
       </div>
 
       {/* Sample Queries */}

@@ -39,7 +39,6 @@ import {
 import {
   INITIAL_DATASETS,
   INITIAL_TRANSACTIONS,
-  INITIAL_QUERY_HISTORY,
   MOCK_DATA_VERSION,
 } from './data/mockData';
 
@@ -92,18 +91,8 @@ export default function App() {
     return INITIAL_TRANSACTIONS;
   });
 
-  const [queryHistory, setQueryHistory] = useState<QueryHistoryItem[]>(() => {
-    try {
-      const storedVer = localStorage.getItem('datapulse_version_key');
-      if (storedVer === MOCK_DATA_VERSION) {
-        const saved = localStorage.getItem(`${MOCK_STORAGE_KEY}_history`);
-        if (saved) return JSON.parse(saved);
-      }
-    } catch (e) {
-      // fallback
-    }
-    return INITIAL_QUERY_HISTORY;
-  });
+  // Isolated query history for current authenticated user
+  const [queryHistory, setQueryHistory] = useState<QueryHistoryItem[]>([]);
 
   const [selectedDatasetId, setSelectedDatasetId] = useState<string>('ds-heart');
   const [workspaceInitialPrompt, setWorkspaceInitialPrompt] = useState<string>('');
@@ -115,11 +104,10 @@ export default function App() {
       localStorage.setItem('datapulse_version_key', MOCK_DATA_VERSION);
       localStorage.setItem(`${MOCK_STORAGE_KEY}_datasets`, JSON.stringify(datasets));
       localStorage.setItem(`${MOCK_STORAGE_KEY}_transactions`, JSON.stringify(transactions));
-      localStorage.setItem(`${MOCK_STORAGE_KEY}_history`, JSON.stringify(queryHistory));
     } catch (e) {
       // ignore
     }
-  }, [datasets, transactions, queryHistory]);
+  }, [datasets, transactions]);
 
   // Safe fallback for views requiring a UserAccount while rendering unauthenticated landing
   const effectiveUser: UserAccount = currentUser || {
@@ -182,7 +170,7 @@ export default function App() {
           email: me.email,
           role: 'Contributor',
           credits: me.credits,
-          reputationScore: 85,
+          reputationScore: me.reputation_score ?? 50,
           contributedDatasetIds: [],
           unlockedDatasetIds: [],
           joinedDate: me.created_at
@@ -192,6 +180,7 @@ export default function App() {
 
         setCurrentUser(restoredAccount);
         setIsAuthenticated(true);
+        setCurrentRoute((curr) => (curr === 'login' ? 'dashboard' : curr));
 
         // Fetch real datasets from backend catalog
         try {
@@ -212,6 +201,14 @@ export default function App() {
           const txList = await api.credits.getTransactions();
           if (txList && isMounted) {
             setTransactions(txList.map(transactionItemToWalletTransaction));
+          }
+        } catch {}
+
+        // Fetch real query history for authenticated user
+        try {
+          const histRes = await api.query.getHistory({ page: 1, limit: 50 });
+          if (histRes?.items && isMounted) {
+            setQueryHistory(histRes.items.filter((q) => q.userId === me.id));
           }
         } catch {}
       } catch {
@@ -235,8 +232,13 @@ export default function App() {
     };
   }, []);
 
-  // Protected route guard
+  // Protected route guard & authenticated login redirect
   const handleNavigate = (route: PageRoute) => {
+    if (route === 'login' && (isAuthenticated || !!currentUser || !!api.auth.getToken())) {
+      setCurrentRoute('dashboard');
+      return;
+    }
+
     if (PROTECTED_ROUTES.includes(route) && !isAuthenticated) {
       addToast(
         'AUTHENTICATION_REQUIRED',
@@ -260,7 +262,7 @@ export default function App() {
       email: user.email,
       role: role,
       credits: user.credits,
-      reputationScore: 85,
+      reputationScore: user.reputation_score ?? 50,
       contributedDatasetIds: [],
       unlockedDatasetIds: [],
       joinedDate: user.created_at
@@ -301,12 +303,26 @@ export default function App() {
         }
       })
       .catch(() => {});
+
+    // Fetch real query history for newly logged-in user
+    api.query
+      .getHistory({ page: 1, limit: 50 })
+      .then((histRes) => {
+        if (histRes?.items) {
+          setQueryHistory(histRes.items.filter((q) => q.userId === user.id));
+        }
+      })
+      .catch(() => {});
   };
 
   const handleLogout = () => {
     api.auth.logout();
     setCurrentUser(null);
     setIsAuthenticated(false);
+    setQueryHistory([]);
+    try {
+      localStorage.removeItem(`${MOCK_STORAGE_KEY}_history`);
+    } catch {}
     setCurrentRoute('login');
     addToast('SESSION_ENDED', 'You have been successfully signed out.', 'emerald');
   };
@@ -364,7 +380,15 @@ export default function App() {
       api.auth
         .getMe()
         .then((me) => {
-          setCurrentUser((prev) => (prev ? { ...prev, credits: me.credits } : null));
+          setCurrentUser((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  credits: me.credits,
+                  reputationScore: me.reputation_score ?? prev.reputationScore,
+                }
+              : null
+          );
         })
         .catch(() => {});
 
@@ -457,6 +481,16 @@ export default function App() {
           .catch(() => {});
       }
 
+      // 5. Refresh authoritative query history from backend
+      api.query
+        .getHistory({ page: 1, limit: 50 })
+        .then((h) => {
+          if (h?.items) {
+            setQueryHistory(h.items.filter((q) => q.userId === effectiveUser.id));
+          }
+        })
+        .catch(() => {});
+
       onSuccess({
         generatedSql: res.sql_query || '',
         rows,
@@ -523,6 +557,16 @@ export default function App() {
       };
       setQueryHistory((prev) => [historyItem, ...prev]);
 
+      // Refresh authoritative query history from backend
+      api.query
+        .getHistory({ page: 1, limit: 50 })
+        .then((h) => {
+          if (h?.items) {
+            setQueryHistory(h.items.filter((q) => q.userId === effectiveUser.id));
+          }
+        })
+        .catch(() => {});
+
       onError({
         type: errorType,
         message: errorMessage,
@@ -536,69 +580,133 @@ export default function App() {
     }
   };
 
-  // Submit Dataset Improvement
+  // Real Backend Dataset Unlock Handler
+  const handleUnlockDataset = async (datasetId: string) => {
+    try {
+      const res = await api.datasets.unlock(datasetId);
+
+      // Deduct balance and update unlockedBy state
+      setCurrentUser((prev) =>
+        prev ? { ...prev, credits: res.remaining_balance } : null
+      );
+
+      setDatasets((prev) =>
+        prev.map((d) =>
+          d.id === datasetId
+            ? {
+                ...d,
+                unlockedBy: Array.from(new Set([...d.unlockedBy, effectiveUser.id])),
+              }
+            : d
+        )
+      );
+
+      // Refresh transactions ledger
+      api.credits
+        .getTransactions()
+        .then((txList) => {
+          if (txList) {
+            setTransactions(txList.map(transactionItemToWalletTransaction));
+          }
+        })
+        .catch(() => {});
+
+      if (res.credits_charged > 0) {
+        addToast(
+          'DATASET_UNLOCKED',
+          `Successfully unlocked dataset for ${res.credits_charged} credits! Remaining balance: ${res.remaining_balance} cr.`,
+          'emerald'
+        );
+      } else {
+        addToast(
+          'DATASET_UNLOCKED',
+          'Dataset access confirmed. You already have access to this dataset.',
+          'cyan'
+        );
+      }
+    } catch (err: any) {
+      addToast(
+        'UNLOCK_FAILED',
+        err?.message || 'Failed to unlock dataset.',
+        'rose'
+      );
+      throw err;
+    }
+  };
+
+  // Submit Dataset Improvement to Backend
   // improvement credits = floor(delta x 0.75) if delta >= 5
-  const handleSubmitImprovement = (
+  const handleSubmitImprovement = async (
     datasetId: string,
     newQuality: number,
     newRelevance: number,
     changesSummary: string,
-    creditsAwarded: number
+    _creditsAwarded: number
   ) => {
-    setDatasets((prev) =>
-      prev.map((d) => {
-        if (d.id !== datasetId) return d;
-        const currentVerNum = parseInt(d.currentVersion.replace('v', '')) || 1;
-        const nextVer = `v${currentVerNum + 1}.0`;
-        const newOverall = (newQuality + newRelevance) / 2;
+    try {
+      const res = await api.datasets.improve(datasetId, {
+        new_quality_score: newQuality,
+        new_relevance_score: newRelevance,
+        changes_summary: changesSummary,
+      });
 
-        return {
-          ...d,
-          qualityScore: newQuality,
-          relevanceScore: newRelevance,
-          overallScore: newOverall,
-          currentVersion: nextVer,
-          versionHistory: [
-            {
-              version: nextVer,
-              date: new Date().toISOString().split('T')[0],
-              author: effectiveUser.name,
-              quality: newQuality,
-              relevance: newRelevance,
-              changesSummary,
-            },
-            ...d.versionHistory,
-          ],
-        };
-      })
-    );
-
-    if (creditsAwarded > 0) {
-      const tx: WalletTransaction = {
-        id: `tx_imp_${Date.now()}`,
-        userId: effectiveUser.id,
-        type: 'IMPROVEMENT_REWARD',
-        amount: creditsAwarded,
-        description: `Version Improvement Reward (+${creditsAwarded} credits)`,
-        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      };
-      const nextTransactions = [tx, ...transactions];
-      setTransactions(nextTransactions);
-
+      // Update user state from authoritative backend response
       setCurrentUser((prev) =>
-        prev ? { ...prev, credits: prev.credits + creditsAwarded } : null
+        prev
+          ? {
+              ...prev,
+              credits: prev.credits + res.improvement_credits_awarded,
+              reputationScore: res.new_reputation_score,
+            }
+          : null
       );
 
+      // Fetch fresh /auth/me for exact credit synchronization
+      api.auth.getMe().then((me) => {
+        setCurrentUser((prev) => prev ? { ...prev, credits: me.credits, reputationScore: me.reputation_score ?? prev.reputationScore } : null);
+      }).catch(() => {});
+
+      // Refresh transactions and datasets
+      api.credits
+        .getTransactions()
+        .then((txList) => {
+          if (txList) {
+            setTransactions(txList.map(transactionItemToWalletTransaction));
+          }
+        })
+        .catch(() => {});
+
+      api.datasets
+        .list()
+        .then((dsList) => {
+          if (dsList?.datasets) {
+            setDatasets(
+              dsList.datasets.map((d) =>
+                backendDatasetToAppDataset(d, effectiveUser.id)
+              )
+            );
+          }
+        })
+        .catch(() => {});
+
+      if (res.improvement_credits_awarded > 0) {
+        addToast(
+          'VERSION_IMPROVED',
+          `Version upgrade published! You earned +${res.improvement_credits_awarded} credits (Delta: +${res.delta_score.toFixed(1)} pts).`,
+          'emerald'
+        );
+      } else {
+        addToast(
+          'VERSION_IMPROVED',
+          `Version upgrade published. (Delta was ${res.delta_score.toFixed(1)} < 5.0 pts, no bounty awarded).`,
+          'cyan'
+        );
+      }
+    } catch (err: any) {
       addToast(
-        'VERSION_IMPROVED',
-        `Version upgrade published! You earned +${creditsAwarded} credits.`,
-        'emerald'
-      );
-    } else {
-      addToast(
-        'VERSION_IMPROVED',
-        'Version upgrade published without credit reward (delta < 5 pts).',
-        'cyan'
+        'IMPROVEMENT_ERROR',
+        err?.message || 'Failed to submit improvement to backend.',
+        'rose'
       );
     }
 
@@ -708,6 +816,7 @@ export default function App() {
           <LoginRegisterView
             onLoginSuccess={handleAuthSuccess}
             onNavigate={handleNavigate}
+            isAuthenticated={isAuthenticated}
           />
         )}
 
@@ -748,6 +857,7 @@ export default function App() {
             onNavigate={handleNavigate}
             onOpenQueryWithPrompt={handleOpenQueryWorkspace}
             onImproveDataset={handleOpenImprove}
+            onUnlockDataset={handleUnlockDataset}
           />
         )}
 
@@ -775,6 +885,13 @@ export default function App() {
           <QueryHistoryView
             history={queryHistory}
             currentUserId={effectiveUser.id}
+            onNavigateToQuery={() => setCurrentRoute('query')}
+            onRefreshHistory={async () => {
+              const res = await api.query.getHistory({ page: 1, limit: 50 });
+              if (res?.items) {
+                setQueryHistory(res.items.filter((q) => q.userId === effectiveUser.id));
+              }
+            }}
           />
         )}
 

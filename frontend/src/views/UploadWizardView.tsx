@@ -203,7 +203,8 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
       format: 'csv',
       authorId: currentUser.id,
       authorName: currentUser.name,
-      cost: 20,
+      cost: uploadedDataset.unlock_price ?? 10,
+      unlockPrice: uploadedDataset.unlock_price ?? 10,
       qualityScore: finalQuality,
       relevanceScore: finalRelevance,
       overallScore: finalOverall,
@@ -698,17 +699,45 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
               </div>
 
               {/* Reward Breakdown Card */}
-              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 space-y-2">
-                <span className="text-xs font-semibold text-emerald-800 uppercase tracking-wider block">
-                  Reward Breakdown
-                </span>
-                <div className="text-lg sm:text-xl font-bold font-mono text-emerald-700">
-                  {uploadedDataset.credits_awarded !== undefined
-                    ? `+${uploadedDataset.credits_awarded} credits awarded`
-                    : 'Dataset verified and registered successfully'}
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-emerald-800 uppercase tracking-wider block">
+                    Reward Calculation Breakdown
+                  </span>
+                  <span className="text-lg sm:text-xl font-bold font-mono text-emerald-700">
+                    {uploadedDataset.credits_awarded !== undefined
+                      ? `+${uploadedDataset.credits_awarded} credits awarded`
+                      : 'Dataset verified and registered successfully'}
+                  </span>
                 </div>
-                <p className="text-xs text-emerald-600">
-                  Published datasets are indexed for instant plain English queries. You will also earn +20 credits each time another user unlocks this dataset.
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-emerald-200/60 text-xs">
+                  <div className="bg-white/70 rounded-lg p-2.5 border border-emerald-200/50">
+                    <span className="text-slate-500 block text-[11px]">Basic Upload Reward:</span>
+                    <span className="font-bold font-mono text-emerald-800">+50 credits</span>
+                  </div>
+                  <div className="bg-white/70 rounded-lg p-2.5 border border-emerald-200/50">
+                    <span className="text-slate-500 block text-[11px]">Quality Evaluation Reward:</span>
+                    <span className="font-bold font-mono text-emerald-800">
+                      +{Math.max(0, (uploadedDataset.credits_awarded ?? 50) - 50)} credits
+                    </span>
+                    <span className="text-[10px] text-slate-400 block">
+                      (round({uploadedDataset.overall_score ?? 0} × 0.50))
+                    </span>
+                  </div>
+                  <div className="bg-white/70 rounded-lg p-2.5 border border-emerald-200/50">
+                    <span className="text-slate-500 block text-[11px]">Calculated Unlock Price:</span>
+                    <span className="font-bold font-mono text-indigo-700">
+                      {uploadedDataset.unlock_price ?? 10} credits
+                    </span>
+                    <span className="text-[10px] text-slate-400 block">
+                      (You earn 1 cr royalty on unlocks)
+                    </span>
+                  </div>
+                </div>
+
+                <p className="text-xs text-emerald-700 leading-relaxed pt-1">
+                  Rewards are permanently credited to your ledger. Published datasets are indexed for instant natural language querying.
                 </p>
               </div>
 
