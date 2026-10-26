@@ -30,6 +30,7 @@ def init_db():
         password_hash TEXT NOT NULL,
         full_name TEXT NOT NULL,
         credits INTEGER NOT NULL DEFAULT 100,
+        is_admin INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -125,6 +126,18 @@ def init_db():
         FOREIGN KEY(dataset_id) REFERENCES datasets(id),
         FOREIGN KEY(user_id) REFERENCES users(id)
     );
+
+    CREATE TABLE IF NOT EXISTS admin_audit_logs (
+        id TEXT PRIMARY KEY,
+        admin_user_id TEXT NOT NULL,
+        admin_email TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target_resource TEXT,
+        details TEXT,
+        ip_address TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(admin_user_id) REFERENCES users(id)
+    );
     """)
 
     # Safe column migrations on existing tables
@@ -133,11 +146,13 @@ def init_db():
 
 def _run_safe_migrations(conn: sqlite3.Connection):
     cursor = conn.cursor()
-    # Check users table for reputation_score
+    # Check users table for reputation_score and is_admin
     cursor.execute("PRAGMA table_info(users)")
     user_cols = [r[1] for r in cursor.fetchall()]
     if "reputation_score" not in user_cols:
         cursor.execute("ALTER TABLE users ADD COLUMN reputation_score INTEGER NOT NULL DEFAULT 50")
+    if "is_admin" not in user_cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
 
     # Check datasets table for unlock_price
     cursor.execute("PRAGMA table_info(datasets)")

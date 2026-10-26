@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     QUERY_COST: int = 1
     DATASET_OWNER_REWARD: int = 1
 
+    # Administrator Authorization
+    ADMIN_EMAIL: str = "datapulseapplication@gmail.com"
+
     SECRET_KEY: str = "datapulse-production-secret-key-replace-in-env"
     DATABASE_PATH: str = "datapulse.db"
     DUCKDB_PATH: str = "datapulse_analytics.duckdb"

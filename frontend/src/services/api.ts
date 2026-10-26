@@ -19,6 +19,13 @@ import {
   DatasetImproveResponse,
   QueryHistoryItem,
   QueryHistoryResponse,
+  AdminOverview,
+  AdminUserListResponse,
+  AdminUserDetail,
+  AdminDatasetListResponse,
+  AdminQueryListResponse,
+  AdminTransactionListResponse,
+  AdminAuditLogListResponse,
 } from '../types';
 import { backendQueryHistoryItemToQueryHistoryItem } from './datasetAdapter';
 
@@ -504,6 +511,134 @@ export const api = {
       return request<UserStatsResponse>('/me/stats', {
         method: 'GET',
       });
+    },
+  },
+
+  admin: {
+    /**
+     * Retrieves administrative overview and platform KPIs via GET /admin/overview.
+     */
+    async getOverview(): Promise<AdminOverview> {
+      return request<AdminOverview>('/admin/overview', { method: 'GET' });
+    },
+
+    /**
+     * Retrieves paginated, searchable user registry via GET /admin/users.
+     */
+    async getUsers(params?: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      role?: string;
+      sort_by?: string;
+      sort_order?: string;
+    }): Promise<AdminUserListResponse> {
+      const searchParams = new URLSearchParams();
+      if (params?.page) searchParams.set('page', params.page.toString());
+      if (params?.limit) searchParams.set('limit', params.limit.toString());
+      if (params?.search && params.search.trim()) searchParams.set('search', params.search.trim());
+      if (params?.role && params.role !== 'all') searchParams.set('role', params.role);
+      if (params?.sort_by) searchParams.set('sort_by', params.sort_by);
+      if (params?.sort_order) searchParams.set('sort_order', params.sort_order);
+      const queryStr = searchParams.toString();
+      return request<AdminUserListResponse>(`/admin/users${queryStr ? `?${queryStr}` : ''}`, { method: 'GET' });
+    },
+
+    /**
+     * Retrieves comprehensive user detail view via GET /admin/users/{userId}.
+     */
+    async getUserDetail(userId: string): Promise<AdminUserDetail> {
+      return request<AdminUserDetail>(`/admin/users/${encodeURIComponent(userId)}`, { method: 'GET' });
+    },
+
+    /**
+     * Retrieves paginated dataset registry with quality ratings via GET /admin/datasets.
+     */
+    async getDatasets(params?: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      domain?: string;
+      owner_id?: string;
+      sort_by?: string;
+      sort_order?: string;
+    }): Promise<AdminDatasetListResponse> {
+      const searchParams = new URLSearchParams();
+      if (params?.page) searchParams.set('page', params.page.toString());
+      if (params?.limit) searchParams.set('limit', params.limit.toString());
+      if (params?.search && params.search.trim()) searchParams.set('search', params.search.trim());
+      if (params?.domain && params.domain !== 'all') searchParams.set('domain', params.domain);
+      if (params?.owner_id) searchParams.set('owner_id', params.owner_id);
+      if (params?.sort_by) searchParams.set('sort_by', params.sort_by);
+      if (params?.sort_order) searchParams.set('sort_order', params.sort_order);
+      const queryStr = searchParams.toString();
+      return request<AdminDatasetListResponse>(`/admin/datasets${queryStr ? `?${queryStr}` : ''}`, { method: 'GET' });
+    },
+
+    /**
+     * Retrieves global query execution log across all users via GET /admin/queries.
+     */
+    async getQueries(params?: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      user_id?: string;
+      dataset_id?: string;
+      status?: string;
+      start_date?: string;
+      end_date?: string;
+    }): Promise<AdminQueryListResponse> {
+      const searchParams = new URLSearchParams();
+      if (params?.page) searchParams.set('page', params.page.toString());
+      if (params?.limit) searchParams.set('limit', params.limit.toString());
+      if (params?.search && params.search.trim()) searchParams.set('search', params.search.trim());
+      if (params?.user_id) searchParams.set('user_id', params.user_id);
+      if (params?.dataset_id) searchParams.set('dataset_id', params.dataset_id);
+      if (params?.status && params.status !== 'All') searchParams.set('status', params.status);
+      if (params?.start_date) searchParams.set('start_date', params.start_date);
+      if (params?.end_date) searchParams.set('end_date', params.end_date);
+      const queryStr = searchParams.toString();
+      return request<AdminQueryListResponse>(`/admin/queries${queryStr ? `?${queryStr}` : ''}`, { method: 'GET' });
+    },
+
+    /**
+     * Retrieves global platform credit ledger transactions via GET /admin/transactions.
+     */
+    async getTransactions(params?: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      user_id?: string;
+      transaction_type?: string;
+      start_date?: string;
+      end_date?: string;
+    }): Promise<AdminTransactionListResponse> {
+      const searchParams = new URLSearchParams();
+      if (params?.page) searchParams.set('page', params.page.toString());
+      if (params?.limit) searchParams.set('limit', params.limit.toString());
+      if (params?.search && params.search.trim()) searchParams.set('search', params.search.trim());
+      if (params?.user_id) searchParams.set('user_id', params.user_id);
+      if (params?.transaction_type && params.transaction_type !== 'all') searchParams.set('transaction_type', params.transaction_type);
+      if (params?.start_date) searchParams.set('start_date', params.start_date);
+      if (params?.end_date) searchParams.set('end_date', params.end_date);
+      const queryStr = searchParams.toString();
+      return request<AdminTransactionListResponse>(`/admin/transactions${queryStr ? `?${queryStr}` : ''}`, { method: 'GET' });
+    },
+
+    /**
+     * Retrieves administrative governance and audit logs via GET /admin/audit-logs.
+     */
+    async getAuditLogs(params?: {
+      page?: number;
+      limit?: number;
+      action?: string;
+    }): Promise<AdminAuditLogListResponse> {
+      const searchParams = new URLSearchParams();
+      if (params?.page) searchParams.set('page', params.page.toString());
+      if (params?.limit) searchParams.set('limit', params.limit.toString());
+      if (params?.action && params.action !== 'All') searchParams.set('action', params.action);
+      const queryStr = searchParams.toString();
+      return request<AdminAuditLogListResponse>(`/admin/audit-logs${queryStr ? `?${queryStr}` : ''}`, { method: 'GET' });
     },
   },
 };

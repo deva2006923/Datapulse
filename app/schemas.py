@@ -26,6 +26,7 @@ class UserResponse(BaseModel):
     full_name: str
     credits: int
     reputation_score: int = Field(default=50, description="Persisted user reputation score (0-100)")
+    is_admin: bool = Field(default=False, description="Whether the user is an authorized platform administrator")
     created_at: str
 
 class AuthTokenResponse(BaseModel):
@@ -230,3 +231,176 @@ class DatasetImproveResponse(BaseModel):
     changes_summary: str
     created_at: str
 
+
+# ==============================================================================
+# Admin Dashboard & Governance Schemas
+# ==============================================================================
+
+class AdminActivityItem(BaseModel):
+    id: str
+    type: str = Field(description="USER_REGISTER, DATASET_UPLOAD, QUERY_EXECUTION, CREDIT_TRANSACTION")
+    description: str
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
+    status: Optional[str] = "SUCCESS"
+    timestamp: str
+
+
+class AdminOverviewResponse(BaseModel):
+    total_users: int
+    total_datasets: int
+    total_queries: int
+    total_queries_successful: int
+    total_queries_failed: int
+    total_credits_issued: int
+    total_credits_spent: int
+    net_credit_liability: int
+    recent_activity: List[AdminActivityItem]
+
+
+class AdminUserItem(BaseModel):
+    id: str
+    email: str
+    full_name: str
+    credits: int
+    reputation_score: int
+    is_admin: bool
+    account_status: str = "Active"
+    datasets_count: int = 0
+    queries_count: int = 0
+    created_at: str
+
+
+class AdminUserListResponse(BaseModel):
+    items: List[AdminUserItem]
+    total: int
+    page: int
+    limit: int
+    has_more: bool
+
+
+class AdminUserDatasetItem(BaseModel):
+    id: str
+    name: str
+    filename: str
+    domain: str
+    rows_count: int
+    columns_count: int
+    quality_score: Optional[float] = None
+    unlock_price: int = 10
+    created_at: str
+
+
+class AdminUserDetailResponse(BaseModel):
+    id: str
+    email: str
+    full_name: str
+    credits: int
+    reputation_score: int
+    is_admin: bool
+    account_status: str
+    created_at: str
+    total_datasets: int
+    total_queries: int
+    total_credits_earned: int
+    total_credits_spent: int
+    datasets: List[AdminUserDatasetItem]
+    recent_queries: List[Dict[str, Any]]
+    recent_transactions: List[Dict[str, Any]]
+
+
+class AdminDatasetItem(BaseModel):
+    id: str
+    title: str
+    name: str
+    filename: str
+    owner_id: str
+    owner_name: str
+    owner_email: str
+    domain: str
+    rows_count: int
+    columns_count: int
+    quality_score: Optional[float] = None
+    domain_relevance_score: Optional[float] = None
+    overall_score: Optional[float] = None
+    evaluation_status: Optional[str] = None
+    credits_awarded: Optional[int] = None
+    unlock_price: int = 10
+    unlock_count: int = 0
+    availability: str = "Available"
+    content_summary: str
+    created_at: str
+
+
+class AdminDatasetListResponse(BaseModel):
+    items: List[AdminDatasetItem]
+    total: int
+    page: int
+    limit: int
+    has_more: bool
+
+
+class AdminQueryItem(BaseModel):
+    id: str
+    user_id: str
+    user_email: str
+    user_name: str
+    natural_prompt: str
+    dataset_id: Optional[str] = None
+    dataset_name: Optional[str] = "Cross-Catalog"
+    generated_sql: Optional[str] = None
+    execution_status: str = "SUCCESS"
+    execution_time_ms: int = 0
+    rows_returned: int = 0
+    credits_charged: int = 0
+    error_message: Optional[str] = None
+    timestamp: str
+
+
+class AdminQueryListResponse(BaseModel):
+    items: List[AdminQueryItem]
+    total: int
+    page: int
+    limit: int
+    has_more: bool
+
+
+class AdminTransactionItem(BaseModel):
+    id: str
+    user_id: str
+    user_email: str
+    user_name: str
+    transaction_type: str
+    amount: int
+    balance_impact: str
+    associated_resource: Optional[str] = None
+    description: str
+    status: str
+    timestamp: str
+
+
+class AdminTransactionListResponse(BaseModel):
+    items: List[AdminTransactionItem]
+    total: int
+    page: int
+    limit: int
+    has_more: bool
+
+
+class AdminAuditLogItem(BaseModel):
+    id: str
+    admin_user_id: str
+    admin_email: str
+    action: str
+    target_resource: Optional[str] = None
+    details: Optional[str] = None
+    ip_address: Optional[str] = None
+    timestamp: str
+
+
+class AdminAuditLogListResponse(BaseModel):
+    items: List[AdminAuditLogItem]
+    total: int
+    page: int
+    limit: int
+    has_more: bool

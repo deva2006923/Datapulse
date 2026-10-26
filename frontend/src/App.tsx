@@ -18,6 +18,7 @@ import { MyDatasetsView } from './views/MyDatasetsView';
 import { VersionsImproveView } from './views/VersionsImproveView';
 import { WalletView } from './views/WalletView';
 import { ProfileView } from './views/ProfileView';
+import { AdminDashboardView } from './views/AdminDashboardView';
 import { NotFoundView } from './views/NotFoundView';
 
 import {
@@ -55,6 +56,7 @@ const PROTECTED_ROUTES: PageRoute[] = [
   'versions-improve',
   'wallet',
   'profile',
+  'admin',
 ];
 
 export default function App() {
@@ -168,7 +170,7 @@ export default function App() {
           id: me.id,
           name: me.full_name,
           email: me.email,
-          role: 'Contributor',
+          role: me.is_admin ? 'Admin' : 'Contributor',
           credits: me.credits,
           reputationScore: me.reputation_score ?? 50,
           contributedDatasetIds: [],
@@ -176,6 +178,7 @@ export default function App() {
           joinedDate: me.created_at
             ? me.created_at.split('T')[0]
             : new Date().toISOString().split('T')[0],
+          isAdmin: !!me.is_admin,
         };
 
         setCurrentUser(restoredAccount);
@@ -260,7 +263,7 @@ export default function App() {
       id: user.id,
       name: user.full_name,
       email: user.email,
-      role: role,
+      role: user.is_admin ? 'Admin' : role,
       credits: user.credits,
       reputationScore: user.reputation_score ?? 50,
       contributedDatasetIds: [],
@@ -268,6 +271,7 @@ export default function App() {
       joinedDate: user.created_at
         ? user.created_at.split('T')[0]
         : new Date().toISOString().split('T')[0],
+      isAdmin: !!user.is_admin,
     };
 
     setCurrentUser(userAccount);
@@ -934,6 +938,14 @@ export default function App() {
             onSwitchUser={handleSwitchUser}
             datasets={datasets}
             queryHistory={queryHistory}
+          />
+        )}
+
+        {currentRoute === 'admin' && (
+          <AdminDashboardView
+            currentUser={effectiveUser}
+            onNavigate={handleNavigate}
+            addToast={addToast}
           />
         )}
 

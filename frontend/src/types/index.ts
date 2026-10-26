@@ -11,6 +11,7 @@ export type PageRoute =
   | 'versions-improve'
   | 'wallet'
   | 'profile'
+  | 'admin'
   | '404';
 
 export interface UserAccount {
@@ -23,6 +24,7 @@ export interface UserAccount {
   contributedDatasetIds: string[];
   unlockedDatasetIds: string[];
   joinedDate: string;
+  isAdmin?: boolean;
 }
 
 export interface BackendUserResponse {
@@ -31,6 +33,7 @@ export interface BackendUserResponse {
   full_name: string;
   credits: number;
   reputation_score?: number;
+  is_admin?: boolean;
   created_at: string;
 }
 
@@ -303,4 +306,175 @@ export interface ToastMessage {
     label: string;
     onClick: () => void;
   };
+}
+
+// Admin Dashboard Types
+export interface AdminActivityItem {
+  id: string;
+  type: 'USER_REGISTER' | 'DATASET_UPLOAD' | 'QUERY_EXECUTION' | 'CREDIT_TRANSACTION';
+  description: string;
+  user_id?: string;
+  user_email?: string;
+  status?: string;
+  timestamp: string;
+}
+
+export interface AdminOverview {
+  total_users: number;
+  total_datasets: number;
+  total_queries: number;
+  total_queries_successful: number;
+  total_queries_failed: number;
+  total_credits_issued: number;
+  total_credits_spent: number;
+  net_credit_liability: number;
+  recent_activity: AdminActivityItem[];
+}
+
+export interface AdminUserItem {
+  id: string;
+  email: string;
+  full_name: string;
+  credits: number;
+  reputation_score: number;
+  is_admin: boolean;
+  account_status: string;
+  datasets_count: number;
+  queries_count: number;
+  created_at: string;
+}
+
+export interface AdminUserListResponse {
+  items: AdminUserItem[];
+  total: number;
+  page: number;
+  limit: number;
+  has_more: boolean;
+}
+
+export interface AdminUserDatasetItem {
+  id: string;
+  name: string;
+  filename: string;
+  domain: string;
+  rows_count: number;
+  columns_count: number;
+  quality_score?: number | null;
+  unlock_price: number;
+  created_at: string;
+}
+
+export interface AdminUserDetail {
+  id: string;
+  email: string;
+  full_name: string;
+  credits: number;
+  reputation_score: number;
+  is_admin: boolean;
+  account_status: string;
+  created_at: string;
+  total_datasets: number;
+  total_queries: number;
+  total_credits_earned: number;
+  total_credits_spent: number;
+  datasets: AdminUserDatasetItem[];
+  recent_queries: Record<string, any>[];
+  recent_transactions: Record<string, any>[];
+}
+
+export interface AdminDatasetItem {
+  id: string;
+  title: string;
+  name: string;
+  filename: string;
+  owner_id: string;
+  owner_name: string;
+  owner_email: string;
+  domain: string;
+  rows_count: number;
+  columns_count: number;
+  quality_score?: number | null;
+  domain_relevance_score?: number | null;
+  overall_score?: number | null;
+  evaluation_status?: string | null;
+  credits_awarded?: number | null;
+  unlock_price: number;
+  unlock_count: number;
+  availability: string;
+  content_summary: string;
+  created_at: string;
+}
+
+export interface AdminDatasetListResponse {
+  items: AdminDatasetItem[];
+  total: number;
+  page: number;
+  limit: number;
+  has_more: boolean;
+}
+
+export interface AdminQueryItem {
+  id: string;
+  user_id: string;
+  user_email: string;
+  user_name: string;
+  natural_prompt: string;
+  dataset_id?: string | null;
+  dataset_name?: string | null;
+  generated_sql?: string | null;
+  execution_status: string;
+  execution_time_ms: number;
+  rows_returned: number;
+  credits_charged: number;
+  error_message?: string | null;
+  timestamp: string;
+}
+
+export interface AdminQueryListResponse {
+  items: AdminQueryItem[];
+  total: number;
+  page: number;
+  limit: number;
+  has_more: boolean;
+}
+
+export interface AdminTransactionItem {
+  id: string;
+  user_id: string;
+  user_email: string;
+  user_name: string;
+  transaction_type: string;
+  amount: number;
+  balance_impact: string;
+  associated_resource?: string | null;
+  description: string;
+  status: string;
+  timestamp: string;
+}
+
+export interface AdminTransactionListResponse {
+  items: AdminTransactionItem[];
+  total: number;
+  page: number;
+  limit: number;
+  has_more: boolean;
+}
+
+export interface AdminAuditLogItem {
+  id: string;
+  admin_user_id: string;
+  admin_email: string;
+  action: string;
+  target_resource?: string | null;
+  details?: string | null;
+  ip_address?: string | null;
+  timestamp: string;
+}
+
+export interface AdminAuditLogListResponse {
+  items: AdminAuditLogItem[];
+  total: number;
+  page: number;
+  limit: number;
+  has_more: boolean;
 }

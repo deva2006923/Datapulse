@@ -54,9 +54,9 @@ def generate_markdown_contract(openapi_spec: Dict[str, Any]) -> str:
             tags = ", ".join(details.get("tags", ["General"]))
 
             lines.append(f"### `{method_upper} {path}`")
-            lines.append(f"**Tags**: {tags}  ")
+            lines.append(f"**Tags**: {tags}")
             if summary:
-                lines.append(f"**Description**: {summary}  ")
+                lines.append(f"**Description**: {summary}")
             lines.append("")
 
             # Request Body

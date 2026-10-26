@@ -6,7 +6,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import settings
 from app.database import init_db
 from app.services.storage import init_storage
-from app.routers import health, auth, datasets, query, credits, user
+from app.routers import health, auth, datasets, query, credits, user, admin
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("datapulse")
@@ -52,6 +52,7 @@ app.include_router(datasets.router)
 app.include_router(query.router)
 app.include_router(credits.router)
 app.include_router(user.router)
+app.include_router(admin.router)
 
 if __name__ == "__main__":
     import uvicorn

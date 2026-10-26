@@ -400,6 +400,134 @@
         }
       }
     },
+    "/datasets/{dataset_id}/unlock": {
+      "post": {
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "Unlock Dataset",
+        "description": "Enforces atomic one-time dataset unlock.\n- Owners unlock their own datasets for free.\n- Idempotent: repeated unlock requests do not re-charge an already unlocked dataset.\n- Atomically debits buyer balance and rewards dataset author with royalty credits.",
+        "operationId": "unlock_dataset_datasets__dataset_id__unlock_post",
+        "parameters": [
+          {
+            "name": "dataset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dataset Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetUnlockResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/datasets/{dataset_id}/improve": {
+      "post": {
+        "tags": [
+          "Datasets"
+        ],
+        "summary": "Improve Dataset",
+        "description": "Submits verified quality and schema improvements to an existing dataset.\n- Computes delta improvement against the dataset's current best evaluation score.\n- Awards credits only for verified score improvements (delta >= 5 pts: floor(delta * 0.75)).\n- Prevents duplicate claims on unchanged datasets.\n- Atomically updates user balance, logs credit transaction, and updates user reputation.",
+        "operationId": "improve_dataset_datasets__dataset_id__improve_post",
+        "parameters": [
+          {
+            "name": "dataset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dataset Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetImproveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetImproveResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/search": {
       "post": {
         "tags": [
@@ -593,6 +721,137 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/query/history": {
+      "get": {
+        "tags": [
+          "Query & Analysis"
+        ],
+        "summary": "Get Query History",
+        "description": "Returns the authenticated user's isolated query history.\nStrictly filters records by the backend authenticated user ID.\nSupports search, status filtering, pagination, and orders newest queries first.",
+        "operationId": "get_query_history_query_history_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number, 1-indexed",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number, 1-indexed"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 20,
+              "title": "Limit"
+            },
+            "description": "Items per page"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by status (SUCCESS, SQL_REJECTED, INSUFFICIENT_CREDITS, All)",
+              "title": "Status"
+            },
+            "description": "Filter by status (SUCCESS, SQL_REJECTED, INSUFFICIENT_CREDITS, All)"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Search term for prompt, dataset name, or SQL",
+              "title": "Search"
+            },
+            "description": "Search term for prompt, dataset name, or SQL"
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Ignored: caller cannot access another user's history",
+              "title": "User Id"
+            },
+            "description": "Ignored: caller cannot access another user's history"
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryHistoryResponse"
                 }
               }
             }
@@ -831,10 +1090,1772 @@
           }
         }
       }
+    },
+    "/admin/overview": {
+      "get": {
+        "tags": [
+          "Admin Dashboard"
+        ],
+        "summary": "Get Admin Overview",
+        "description": "Returns platform-wide summary metrics and recent platform activities.\nRequires verified administrator authorization.",
+        "operationId": "get_admin_overview_admin_overview_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminOverviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/users": {
+      "get": {
+        "tags": [
+          "Admin Dashboard"
+        ],
+        "summary": "Get Admin Users",
+        "description": "Searchable, filterable, paginated directory of registered users for administrators.\nNever exposes passwords, tokens, or hashes.",
+        "operationId": "get_admin_users_admin_users_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number, 1-indexed",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number, 1-indexed"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 20,
+              "title": "Limit"
+            },
+            "description": "Items per page"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Search by user name or email",
+              "title": "Search"
+            },
+            "description": "Search by user name or email"
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by role: admin, user, all",
+              "title": "Role"
+            },
+            "description": "Filter by role: admin, user, all"
+          },
+          {
+            "name": "sort_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Sort by: created_at, credits, reputation_score, full_name",
+              "default": "created_at",
+              "title": "Sort By"
+            },
+            "description": "Sort by: created_at, credits, reputation_score, full_name"
+          },
+          {
+            "name": "sort_order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Sort order: asc, desc",
+              "default": "desc",
+              "title": "Sort Order"
+            },
+            "description": "Sort order: asc, desc"
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUserListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/users/{user_id}": {
+      "get": {
+        "tags": [
+          "Admin Dashboard"
+        ],
+        "summary": "Get Admin User Detail",
+        "description": "Returns complete user profile, uploaded datasets, recent query history,\nand credit transactions for administrative inspection.",
+        "operationId": "get_admin_user_detail_admin_users__user_id__get",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUserDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/datasets": {
+      "get": {
+        "tags": [
+          "Admin Dashboard"
+        ],
+        "summary": "Get Admin Datasets",
+        "description": "Returns platform-wide dataset registry with ownership, quality evaluations,\nand storage availability. Avoids unrestricted raw file data dumps.",
+        "operationId": "get_admin_datasets_admin_datasets_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number, 1-indexed",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number, 1-indexed"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 20,
+              "title": "Limit"
+            },
+            "description": "Items per page"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Search by dataset title, filename, domain, or owner",
+              "title": "Search"
+            },
+            "description": "Search by dataset title, filename, domain, or owner"
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by domain",
+              "title": "Domain"
+            },
+            "description": "Filter by domain"
+          },
+          {
+            "name": "owner_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by owner user ID",
+              "title": "Owner Id"
+            },
+            "description": "Filter by owner user ID"
+          },
+          {
+            "name": "sort_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Sort by: created_at, rows_count, quality_score, name",
+              "default": "created_at",
+              "title": "Sort By"
+            },
+            "description": "Sort by: created_at, rows_count, quality_score, name"
+          },
+          {
+            "name": "sort_order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Sort order: asc, desc",
+              "default": "desc",
+              "title": "Sort Order"
+            },
+            "description": "Sort order: asc, desc"
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminDatasetListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/queries": {
+      "get": {
+        "tags": [
+          "Admin Dashboard"
+        ],
+        "summary": "Get Admin Queries",
+        "description": "Global query execution audit log across all users.\nExposes prompt and generated SQL to administrators, but keeps individual user views isolated.",
+        "operationId": "get_admin_queries_admin_queries_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number, 1-indexed",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number, 1-indexed"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 20,
+              "title": "Limit"
+            },
+            "description": "Items per page"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Search prompt, SQL, dataset name, or user email",
+              "title": "Search"
+            },
+            "description": "Search prompt, SQL, dataset name, or user email"
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user ID",
+              "title": "User Id"
+            },
+            "description": "Filter by user ID"
+          },
+          {
+            "name": "dataset_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by dataset ID",
+              "title": "Dataset Id"
+            },
+            "description": "Filter by dataset ID"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by status (SUCCESS, SQL_REJECTED, etc.)",
+              "title": "Status"
+            },
+            "description": "Filter by status (SUCCESS, SQL_REJECTED, etc.)"
+          },
+          {
+            "name": "start_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start date filter YYYY-MM-DD",
+              "title": "Start Date"
+            },
+            "description": "Start date filter YYYY-MM-DD"
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End date filter YYYY-MM-DD",
+              "title": "End Date"
+            },
+            "description": "End date filter YYYY-MM-DD"
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminQueryListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/transactions": {
+      "get": {
+        "tags": [
+          "Admin Dashboard"
+        ],
+        "summary": "Get Admin Transactions",
+        "description": "Platform-wide credit ledger and financial audit history.",
+        "operationId": "get_admin_transactions_admin_transactions_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number, 1-indexed",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number, 1-indexed"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 20,
+              "title": "Limit"
+            },
+            "description": "Items per page"
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Search description or user email",
+              "title": "Search"
+            },
+            "description": "Search description or user email"
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user ID",
+              "title": "User Id"
+            },
+            "description": "Filter by user ID"
+          },
+          {
+            "name": "transaction_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by transaction type",
+              "title": "Transaction Type"
+            },
+            "description": "Filter by transaction type"
+          },
+          {
+            "name": "start_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start date filter YYYY-MM-DD",
+              "title": "Start Date"
+            },
+            "description": "Start date filter YYYY-MM-DD"
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End date filter YYYY-MM-DD",
+              "title": "End Date"
+            },
+            "description": "End date filter YYYY-MM-DD"
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTransactionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/audit-logs": {
+      "get": {
+        "tags": [
+          "Admin Dashboard"
+        ],
+        "summary": "Get Admin Audit Logs",
+        "description": "Returns administrative access and governance audit logs.",
+        "operationId": "get_admin_audit_logs_admin_audit_logs_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page number, 1-indexed",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number, 1-indexed"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Items per page",
+              "default": 20,
+              "title": "Limit"
+            },
+            "description": "Items per page"
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by action name",
+              "title": "Action"
+            },
+            "description": "Filter by action name"
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminAuditLogListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "AdminActivityItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "USER_REGISTER, DATASET_UPLOAD, QUERY_EXECUTION, CREDIT_TRANSACTION"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          },
+          "user_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Email"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status",
+            "default": "SUCCESS"
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "description",
+          "timestamp"
+        ],
+        "title": "AdminActivityItem"
+      },
+      "AdminAuditLogItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "admin_user_id": {
+            "type": "string",
+            "title": "Admin User Id"
+          },
+          "admin_email": {
+            "type": "string",
+            "title": "Admin Email"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "target_resource": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Resource"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "ip_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ip Address"
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "admin_user_id",
+          "admin_email",
+          "action",
+          "timestamp"
+        ],
+        "title": "AdminAuditLogItem"
+      },
+      "AdminAuditLogListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminAuditLogItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "limit",
+          "has_more"
+        ],
+        "title": "AdminAuditLogListResponse"
+      },
+      "AdminDatasetItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "owner_id": {
+            "type": "string",
+            "title": "Owner Id"
+          },
+          "owner_name": {
+            "type": "string",
+            "title": "Owner Name"
+          },
+          "owner_email": {
+            "type": "string",
+            "title": "Owner Email"
+          },
+          "domain": {
+            "type": "string",
+            "title": "Domain"
+          },
+          "rows_count": {
+            "type": "integer",
+            "title": "Rows Count"
+          },
+          "columns_count": {
+            "type": "integer",
+            "title": "Columns Count"
+          },
+          "quality_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Score"
+          },
+          "domain_relevance_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain Relevance Score"
+          },
+          "overall_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overall Score"
+          },
+          "evaluation_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evaluation Status"
+          },
+          "credits_awarded": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credits Awarded"
+          },
+          "unlock_price": {
+            "type": "integer",
+            "title": "Unlock Price",
+            "default": 10
+          },
+          "unlock_count": {
+            "type": "integer",
+            "title": "Unlock Count",
+            "default": 0
+          },
+          "availability": {
+            "type": "string",
+            "title": "Availability",
+            "default": "Available"
+          },
+          "content_summary": {
+            "type": "string",
+            "title": "Content Summary"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "name",
+          "filename",
+          "owner_id",
+          "owner_name",
+          "owner_email",
+          "domain",
+          "rows_count",
+          "columns_count",
+          "content_summary",
+          "created_at"
+        ],
+        "title": "AdminDatasetItem"
+      },
+      "AdminDatasetListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminDatasetItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "limit",
+          "has_more"
+        ],
+        "title": "AdminDatasetListResponse"
+      },
+      "AdminOverviewResponse": {
+        "properties": {
+          "total_users": {
+            "type": "integer",
+            "title": "Total Users"
+          },
+          "total_datasets": {
+            "type": "integer",
+            "title": "Total Datasets"
+          },
+          "total_queries": {
+            "type": "integer",
+            "title": "Total Queries"
+          },
+          "total_queries_successful": {
+            "type": "integer",
+            "title": "Total Queries Successful"
+          },
+          "total_queries_failed": {
+            "type": "integer",
+            "title": "Total Queries Failed"
+          },
+          "total_credits_issued": {
+            "type": "integer",
+            "title": "Total Credits Issued"
+          },
+          "total_credits_spent": {
+            "type": "integer",
+            "title": "Total Credits Spent"
+          },
+          "net_credit_liability": {
+            "type": "integer",
+            "title": "Net Credit Liability"
+          },
+          "recent_activity": {
+            "items": {
+              "$ref": "#/components/schemas/AdminActivityItem"
+            },
+            "type": "array",
+            "title": "Recent Activity"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_users",
+          "total_datasets",
+          "total_queries",
+          "total_queries_successful",
+          "total_queries_failed",
+          "total_credits_issued",
+          "total_credits_spent",
+          "net_credit_liability",
+          "recent_activity"
+        ],
+        "title": "AdminOverviewResponse"
+      },
+      "AdminQueryItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "user_email": {
+            "type": "string",
+            "title": "User Email"
+          },
+          "user_name": {
+            "type": "string",
+            "title": "User Name"
+          },
+          "natural_prompt": {
+            "type": "string",
+            "title": "Natural Prompt"
+          },
+          "dataset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Id"
+          },
+          "dataset_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Name",
+            "default": "Cross-Catalog"
+          },
+          "generated_sql": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generated Sql"
+          },
+          "execution_status": {
+            "type": "string",
+            "title": "Execution Status",
+            "default": "SUCCESS"
+          },
+          "execution_time_ms": {
+            "type": "integer",
+            "title": "Execution Time Ms",
+            "default": 0
+          },
+          "rows_returned": {
+            "type": "integer",
+            "title": "Rows Returned",
+            "default": 0
+          },
+          "credits_charged": {
+            "type": "integer",
+            "title": "Credits Charged",
+            "default": 0
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "user_email",
+          "user_name",
+          "natural_prompt",
+          "timestamp"
+        ],
+        "title": "AdminQueryItem"
+      },
+      "AdminQueryListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminQueryItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "limit",
+          "has_more"
+        ],
+        "title": "AdminQueryListResponse"
+      },
+      "AdminTransactionItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "user_email": {
+            "type": "string",
+            "title": "User Email"
+          },
+          "user_name": {
+            "type": "string",
+            "title": "User Name"
+          },
+          "transaction_type": {
+            "type": "string",
+            "title": "Transaction Type"
+          },
+          "amount": {
+            "type": "integer",
+            "title": "Amount"
+          },
+          "balance_impact": {
+            "type": "string",
+            "title": "Balance Impact"
+          },
+          "associated_resource": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Associated Resource"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "user_email",
+          "user_name",
+          "transaction_type",
+          "amount",
+          "balance_impact",
+          "description",
+          "status",
+          "timestamp"
+        ],
+        "title": "AdminTransactionItem"
+      },
+      "AdminTransactionListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminTransactionItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "limit",
+          "has_more"
+        ],
+        "title": "AdminTransactionListResponse"
+      },
+      "AdminUserDatasetItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "domain": {
+            "type": "string",
+            "title": "Domain"
+          },
+          "rows_count": {
+            "type": "integer",
+            "title": "Rows Count"
+          },
+          "columns_count": {
+            "type": "integer",
+            "title": "Columns Count"
+          },
+          "quality_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Score"
+          },
+          "unlock_price": {
+            "type": "integer",
+            "title": "Unlock Price",
+            "default": 10
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "filename",
+          "domain",
+          "rows_count",
+          "columns_count",
+          "created_at"
+        ],
+        "title": "AdminUserDatasetItem"
+      },
+      "AdminUserDetailResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "full_name": {
+            "type": "string",
+            "title": "Full Name"
+          },
+          "credits": {
+            "type": "integer",
+            "title": "Credits"
+          },
+          "reputation_score": {
+            "type": "integer",
+            "title": "Reputation Score"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "title": "Is Admin"
+          },
+          "account_status": {
+            "type": "string",
+            "title": "Account Status"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "total_datasets": {
+            "type": "integer",
+            "title": "Total Datasets"
+          },
+          "total_queries": {
+            "type": "integer",
+            "title": "Total Queries"
+          },
+          "total_credits_earned": {
+            "type": "integer",
+            "title": "Total Credits Earned"
+          },
+          "total_credits_spent": {
+            "type": "integer",
+            "title": "Total Credits Spent"
+          },
+          "datasets": {
+            "items": {
+              "$ref": "#/components/schemas/AdminUserDatasetItem"
+            },
+            "type": "array",
+            "title": "Datasets"
+          },
+          "recent_queries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Recent Queries"
+          },
+          "recent_transactions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Recent Transactions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "full_name",
+          "credits",
+          "reputation_score",
+          "is_admin",
+          "account_status",
+          "created_at",
+          "total_datasets",
+          "total_queries",
+          "total_credits_earned",
+          "total_credits_spent",
+          "datasets",
+          "recent_queries",
+          "recent_transactions"
+        ],
+        "title": "AdminUserDetailResponse"
+      },
+      "AdminUserItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "full_name": {
+            "type": "string",
+            "title": "Full Name"
+          },
+          "credits": {
+            "type": "integer",
+            "title": "Credits"
+          },
+          "reputation_score": {
+            "type": "integer",
+            "title": "Reputation Score"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "title": "Is Admin"
+          },
+          "account_status": {
+            "type": "string",
+            "title": "Account Status",
+            "default": "Active"
+          },
+          "datasets_count": {
+            "type": "integer",
+            "title": "Datasets Count",
+            "default": 0
+          },
+          "queries_count": {
+            "type": "integer",
+            "title": "Queries Count",
+            "default": 0
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "full_name",
+          "credits",
+          "reputation_score",
+          "is_admin",
+          "created_at"
+        ],
+        "title": "AdminUserItem"
+      },
+      "AdminUserListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminUserItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "limit",
+          "has_more"
+        ],
+        "title": "AdminUserListResponse"
+      },
       "AuthTokenResponse": {
         "properties": {
           "access_token": {
@@ -926,9 +2947,67 @@
             "type": "string",
             "title": "Content Summary"
           },
+          "unlock_price": {
+            "type": "integer",
+            "title": "Unlock Price",
+            "description": "Dataset-specific one-time marketplace unlock price",
+            "default": 10
+          },
+          "unlocked_by": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unlocked By",
+            "description": "User IDs that have unlocked this dataset"
+          },
           "created_at": {
             "type": "string",
             "title": "Created At"
+          },
+          "quality_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Score"
+          },
+          "domain_relevance_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain Relevance Score"
+          },
+          "overall_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overall Score"
+          },
+          "credits_awarded": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credits Awarded"
           }
         },
         "type": "object",
@@ -944,6 +3023,90 @@
           "created_at"
         ],
         "title": "DatasetDetailResponse"
+      },
+      "DatasetImproveRequest": {
+        "properties": {
+          "new_quality_score": {
+            "type": "number",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "New Quality Score",
+            "description": "Proposed quality score"
+          },
+          "new_relevance_score": {
+            "type": "number",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "New Relevance Score",
+            "description": "Proposed relevance score"
+          },
+          "changes_summary": {
+            "type": "string",
+            "minLength": 5,
+            "title": "Changes Summary",
+            "description": "Summary of schema or data enhancements"
+          }
+        },
+        "type": "object",
+        "required": [
+          "new_quality_score",
+          "new_relevance_score",
+          "changes_summary"
+        ],
+        "title": "DatasetImproveRequest"
+      },
+      "DatasetImproveResponse": {
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "title": "Dataset Id"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "previous_overall_score": {
+            "type": "number",
+            "title": "Previous Overall Score"
+          },
+          "new_overall_score": {
+            "type": "number",
+            "title": "New Overall Score"
+          },
+          "delta_score": {
+            "type": "number",
+            "title": "Delta Score"
+          },
+          "improvement_credits_awarded": {
+            "type": "integer",
+            "title": "Improvement Credits Awarded"
+          },
+          "new_reputation_score": {
+            "type": "integer",
+            "title": "New Reputation Score"
+          },
+          "changes_summary": {
+            "type": "string",
+            "title": "Changes Summary"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dataset_id",
+          "version",
+          "previous_overall_score",
+          "new_overall_score",
+          "delta_score",
+          "improvement_credits_awarded",
+          "new_reputation_score",
+          "changes_summary",
+          "created_at"
+        ],
+        "title": "DatasetImproveResponse"
       },
       "DatasetListResponse": {
         "properties": {
@@ -965,6 +3128,44 @@
           "total"
         ],
         "title": "DatasetListResponse"
+      },
+      "DatasetUnlockResponse": {
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "title": "Dataset Id"
+          },
+          "unlocked": {
+            "type": "boolean",
+            "title": "Unlocked"
+          },
+          "already_unlocked": {
+            "type": "boolean",
+            "title": "Already Unlocked"
+          },
+          "credits_charged": {
+            "type": "integer",
+            "title": "Credits Charged"
+          },
+          "remaining_balance": {
+            "type": "integer",
+            "title": "Remaining Balance"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dataset_id",
+          "unlocked",
+          "already_unlocked",
+          "credits_charged",
+          "remaining_balance",
+          "message"
+        ],
+        "title": "DatasetUnlockResponse"
       },
       "EvaluationResponse": {
         "properties": {
@@ -1098,6 +3299,223 @@
         ],
         "title": "HealthResponse"
       },
+      "QueryHistoryItem": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "dataset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Id"
+          },
+          "dataset_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dataset Name",
+            "default": "Cross-Catalog"
+          },
+          "natural_prompt": {
+            "type": "string",
+            "title": "Natural Prompt"
+          },
+          "generated_sql": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generated Sql"
+          },
+          "rows_returned": {
+            "type": "integer",
+            "title": "Rows Returned",
+            "default": 0
+          },
+          "execution_time_ms": {
+            "type": "integer",
+            "title": "Execution Time Ms",
+            "default": 0
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "SUCCESS"
+          },
+          "credits_charged": {
+            "type": "integer",
+            "title": "Credits Charged",
+            "default": 0
+          },
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "userId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Userid"
+          },
+          "datasetId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasetid"
+          },
+          "datasetName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasetname"
+          },
+          "naturalPrompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Naturalprompt"
+          },
+          "generatedSql": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generatedsql"
+          },
+          "rowsReturned": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rowsreturned"
+          },
+          "executionTimeMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executiontimems"
+          },
+          "creditsCharged": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Creditscharged"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "user_id",
+          "natural_prompt",
+          "timestamp"
+        ],
+        "title": "QueryHistoryItem"
+      },
+      "QueryHistoryResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/QueryHistoryItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "limit",
+          "has_more"
+        ],
+        "title": "QueryHistoryResponse"
+      },
       "QueryRequest": {
         "properties": {
           "query": {
@@ -1153,6 +3571,61 @@
           "method": {
             "type": "string",
             "title": "Method"
+          },
+          "sql_query": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sql Query",
+            "description": "Generated and executed SQL query"
+          },
+          "columns": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Columns",
+            "description": "Column names returned by the query"
+          },
+          "results": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Results",
+            "description": "Actual data rows returned from DuckDB"
+          },
+          "credits_charged": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credits Charged",
+            "description": "Credits charged for this query"
           }
         },
         "type": "object",
@@ -1258,6 +3731,12 @@
           "rows_count": {
             "type": "integer",
             "title": "Rows Count"
+          },
+          "unlock_price": {
+            "type": "integer",
+            "title": "Unlock Price",
+            "description": "Dataset-specific unlock price in credits",
+            "default": 10
           }
         },
         "type": "object",
@@ -1449,6 +3928,18 @@
             "type": "integer",
             "title": "Credits"
           },
+          "reputation_score": {
+            "type": "integer",
+            "title": "Reputation Score",
+            "description": "Persisted user reputation score (0-100)",
+            "default": 50
+          },
+          "is_admin": {
+            "type": "boolean",
+            "title": "Is Admin",
+            "description": "Whether the user is an authorized platform administrator",
+            "default": false
+          },
           "created_at": {
             "type": "string",
             "title": "Created At"
@@ -1478,6 +3969,10 @@
             "type": "integer",
             "title": "Credits Balance"
           },
+          "reputation_score": {
+            "type": "integer",
+            "title": "Reputation Score"
+          },
           "datasets_uploaded": {
             "type": "integer",
             "title": "Datasets Uploaded"
@@ -1503,6 +3998,7 @@
           "user_id",
           "email",
           "credits_balance",
+          "reputation_score",
           "datasets_uploaded",
           "total_evaluations_completed",
           "average_quality_score",
