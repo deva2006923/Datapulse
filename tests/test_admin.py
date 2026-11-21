@@ -602,3 +602,96 @@ def test_admin_dataset_detail_and_activity_sort_and_redaction(client):
     assert desc_res.status_code == 200
     desc_ts = [item["timestamp"] for item in desc_res.json()["items"]]
     assert desc_ts == sorted(desc_ts, reverse=True)
+
+
+# 15. Credits in circulation & transaction sender/receiver attribution
+def test_admin_overview_credits_in_circulation_and_transaction_sender_receiver(client):
+    admin = setup_admin_user(client)
+    owner = create_user(client, full_name="Dataset Creator")
+    buyer = create_user(client, full_name="Marketplace Buyer")
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    ds_id = f"ds_tx_{uuid.uuid4().hex[:8]}"
+    q_id = f"qry_tx_{uuid.uuid4().hex[:8]}"
+    cur.execute("""
+        INSERT INTO datasets (id, user_id, name, filename, domain, rows_count, columns_count, schema_json, content_summary, unlock_price, created_at)
+        VALUES (?, ?, 'Revenue Ledger', 'revenue.csv', 'finance', 50, 3, '{"id":"integer","amount":"float","region":"string"}', 'Finance data', 15, '2026-05-01T10:00:00')
+    """, (ds_id, owner["user_id"]))
+    cur.execute("""
+        INSERT INTO queries (id, user_id, query_text, results_json, dataset_id, dataset_name, generated_sql, status, credits_charged, execution_time_ms, result_count, created_at)
+        VALUES (?, ?, 'Total revenue', '[]', ?, 'Revenue Ledger', 'SELECT SUM(amount) FROM dataset', 'SUCCESS', 1, 12, 1, '2026-05-01T11:00:00')
+    """, (q_id, buyer["user_id"], ds_id))
+    cur.execute("""
+        INSERT INTO dataset_unlocks (id, dataset_id, user_id, unlock_price, created_at)
+        VALUES (?, ?, ?, 15, '2026-05-01T11:05:00')
+    """, (f"unl_{uuid.uuid4().hex[:8]}", ds_id, buyer["user_id"]))
+
+    tx_fee = f"tx_fee_{uuid.uuid4().hex[:8]}"
+    tx_rew = f"tx_rew_{uuid.uuid4().hex[:8]}"
+    tx_unl = f"tx_unl_{uuid.uuid4().hex[:8]}"
+    tx_roy = f"tx_roy_{uuid.uuid4().hex[:8]}"
+    tx_red = f"tx_red_{uuid.uuid4().hex[:8]}"
+
+    cur.execute("""
+        INSERT INTO credit_transactions (id, user_id, amount, transaction_type, description, status, created_at)
+        VALUES (?, ?, -1, 'query_fee', ?, 'completed', '2026-05-01T11:00:00')
+    """, (tx_fee, buyer["user_id"], f"Query execution fee for query {q_id} on dataset 'Revenue Ledger' ({ds_id})"))
+    cur.execute("""
+        INSERT INTO credit_transactions (id, user_id, amount, transaction_type, description, status, created_at)
+        VALUES (?, ?, 1, 'query_reward', ?, 'completed', '2026-05-01T11:00:01')
+    """, (tx_rew, owner["user_id"], f"Query reward for query {q_id} on dataset 'Revenue Ledger' ({ds_id})"))
+    cur.execute("""
+        INSERT INTO credit_transactions (id, user_id, amount, transaction_type, description, status, created_at)
+        VALUES (?, ?, -15, 'dataset_unlock', ?, 'completed', '2026-05-01T11:05:00')
+    """, (tx_unl, buyer["user_id"], f"Unlocked dataset 'Revenue Ledger' ({ds_id})"))
+    cur.execute("""
+        INSERT INTO credit_transactions (id, user_id, amount, transaction_type, description, status, created_at)
+        VALUES (?, ?, 15, 'unlock_royalty', ?, 'completed', '2026-05-01T11:05:01')
+    """, (tx_roy, owner["user_id"], f"Unlock royalty for 'Revenue Ledger' ({ds_id}) by Marketplace Buyer"))
+    cur.execute("""
+        INSERT INTO credit_transactions (id, user_id, amount, transaction_type, description, status, created_at)
+        VALUES (?, ?, -50, 'redeem', 'Redeemed 50 credits for payout', 'completed', '2026-05-01T11:10:00')
+    """, (tx_red, owner["user_id"]))
+    conn.commit()
+
+    # Verify total_credits_in_circulation equals exact SUM(users.credits)
+    cur.execute("SELECT COALESCE(SUM(credits), 0) AS total FROM users")
+    expected_circulation = int(cur.fetchone()["total"])
+
+    ov_res = client.get("/admin/overview", headers=admin["headers"])
+    assert ov_res.status_code == 200
+    ov = ov_res.json()
+    assert ov["total_credits_in_circulation"] == expected_circulation
+    assert ov["net_credit_liability"] == expected_circulation
+
+    an_res = client.get("/admin/analytics", headers=admin["headers"])
+    assert an_res.status_code == 200
+    assert an_res.json()["kpis"]["total_credits_in_circulation"] == expected_circulation
+
+    # Verify sender/receiver attribution on GET /admin/transactions
+    tx_res = client.get("/admin/transactions?limit=100", headers=admin["headers"])
+    assert tx_res.status_code == 200
+    assert owner["token"] not in tx_res.text
+    assert buyer["token"] not in tx_res.text
+    assert "password_hash" not in tx_res.text.lower()
+
+    tx_by_id = {item["id"]: item for item in tx_res.json()["items"]}
+
+    assert tx_by_id[tx_fee]["sender_id"] == buyer["user_id"]
+    assert buyer["email"] in tx_by_id[tx_fee]["sender"]
+    assert tx_by_id[tx_fee]["receiver_id"] == owner["user_id"]
+    assert owner["email"] in tx_by_id[tx_fee]["receiver"]
+
+    assert tx_by_id[tx_rew]["sender_id"] == buyer["user_id"]
+    assert tx_by_id[tx_rew]["receiver_id"] == owner["user_id"]
+
+    assert tx_by_id[tx_unl]["sender_id"] == buyer["user_id"]
+    assert tx_by_id[tx_unl]["receiver_id"] == owner["user_id"]
+
+    assert tx_by_id[tx_roy]["sender_id"] == buyer["user_id"]
+    assert tx_by_id[tx_roy]["receiver_id"] == owner["user_id"]
+
+    assert tx_by_id[tx_red]["sender_id"] == owner["user_id"]
+    assert tx_by_id[tx_red]["receiver"] == "Payout Redemption"

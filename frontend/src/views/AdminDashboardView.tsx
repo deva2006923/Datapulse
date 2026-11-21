@@ -793,22 +793,30 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 </div>
               </div>
 
-              {/* 8. Net Credit Movement */}
+              {/* 8. Total Credits in Circulation */}
               <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-2xs">
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                    Net Credit Movement
+                    Credits in Circulation
                   </span>
                   <div className="w-8 h-8 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center">
                     <Coins className="w-4 h-4" />
                   </div>
                 </div>
                 <div className="text-2xl font-black text-slate-900 font-mono">
-                  {(kpis?.net_credit_movement ?? overview?.net_credit_movement ?? 0) >= 0 ? '+' : ''}
-                  {(kpis?.net_credit_movement ?? overview?.net_credit_movement ?? 0).toLocaleString()} cr
+                  {(
+                    kpis?.total_credits_in_circulation ??
+                    overview?.total_credits_in_circulation ??
+                    kpis?.net_credit_liability ??
+                    overview?.net_credit_liability ??
+                    0
+                  ).toLocaleString()}{' '}
+                  cr
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1.5 font-mono">
-                  Liability: {(kpis?.net_credit_liability ?? overview?.net_credit_liability ?? 0).toLocaleString()} cr
+                  Net flow:{' '}
+                  {(kpis?.net_credit_movement ?? overview?.net_credit_movement ?? 0) >= 0 ? '+' : ''}
+                  {(kpis?.net_credit_movement ?? overview?.net_credit_movement ?? 0).toLocaleString()} cr
                 </p>
               </div>
             </div>
@@ -1947,11 +1955,11 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
                   <tr>
-                    <th className="py-3 px-4">User</th>
+                    <th className="py-3 px-4">Sender</th>
+                    <th className="py-3 px-4">Receiver</th>
                     <th className="py-3 px-4">Type</th>
                     <th className="py-3 px-4">Amount</th>
-                    <th className="py-3 px-4">Description</th>
-                    <th className="py-3 px-4">Resource</th>
+                    <th className="py-3 px-4">Description & Resource</th>
                     <th className="py-3 px-4 text-right">Balance After</th>
                     <th className="py-3 px-4">Timestamp</th>
                   </tr>
@@ -1968,17 +1976,49 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                   ) : (
                     transactions.map((t) => {
                       const isCredit = t.amount > 0;
+                      const senderLabel =
+                        t.sender || (isCredit ? 'DataPulse Platform' : `${t.user_name} (${t.user_email})`);
+                      const receiverLabel =
+                        t.receiver || (isCredit ? `${t.user_name} (${t.user_email})` : 'DataPulse Platform');
                       return (
                         <tr key={t.id} className="hover:bg-slate-50/60 transition-colors">
-                          <td className="py-3 px-4">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedUserId(t.user_id)}
-                              className="font-semibold text-slate-800 hover:text-indigo-600 text-left cursor-pointer"
-                            >
-                              {t.user_name}
-                            </button>
-                            <div className="text-[11px] text-slate-400 font-mono">{t.user_email}</div>
+                          <td className="py-3 px-4 max-w-[200px]">
+                            {t.sender_id ? (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedUserId(t.sender_id!)}
+                                className="font-semibold text-slate-800 hover:text-indigo-600 text-left cursor-pointer truncate block max-w-full"
+                                title={senderLabel}
+                              >
+                                {senderLabel}
+                              </button>
+                            ) : (
+                              <span
+                                className="inline-flex items-center px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-[11px] font-medium truncate max-w-full"
+                                title={senderLabel}
+                              >
+                                {senderLabel}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 max-w-[200px]">
+                            {t.receiver_id ? (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedUserId(t.receiver_id!)}
+                                className="font-semibold text-slate-800 hover:text-indigo-600 text-left cursor-pointer truncate block max-w-full"
+                                title={receiverLabel}
+                              >
+                                {receiverLabel}
+                              </button>
+                            ) : (
+                              <span
+                                className="inline-flex items-center px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-[11px] font-medium truncate max-w-full"
+                                title={receiverLabel}
+                              >
+                                {receiverLabel}
+                              </span>
+                            )}
                           </td>
                           <td className="py-3 px-4 whitespace-nowrap">
                             <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-700">
@@ -1999,21 +2039,25 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                               {t.balance_impact} cr
                             </span>
                           </td>
-                          <td className="py-3 px-4 text-slate-700 max-w-sm truncate" title={t.description}>
-                            {t.description}
-                          </td>
-                          <td className="py-3 px-4 text-[11px]">
-                            {t.related_dataset_id ? (
-                              <button
-                                type="button"
-                                onClick={() => setSelectedDatasetId(t.related_dataset_id!)}
-                                className="text-indigo-600 hover:underline font-medium cursor-pointer truncate block max-w-[150px]"
-                              >
-                                {t.related_dataset_name || t.related_dataset_id}
-                              </button>
-                            ) : (
-                              <span className="text-slate-400">{t.associated_resource || 'Account Ledger'}</span>
-                            )}
+                          <td className="py-3 px-4 max-w-sm">
+                            <div className="text-slate-700 truncate" title={t.description}>
+                              {t.description}
+                            </div>
+                            <div className="text-[11px] mt-0.5">
+                              {t.related_dataset_id ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedDatasetId(t.related_dataset_id!)}
+                                  className="text-indigo-600 hover:underline font-medium cursor-pointer truncate block max-w-[180px]"
+                                >
+                                  {t.related_dataset_name || t.related_dataset_id}
+                                </button>
+                              ) : (
+                                <span className="text-slate-400">
+                                  {t.associated_resource || 'Account Ledger'}
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="py-3 px-4 text-right font-mono font-semibold text-slate-800 whitespace-nowrap">
                             {typeof t.balance_after === 'number'

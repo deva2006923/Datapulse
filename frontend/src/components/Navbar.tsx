@@ -49,9 +49,13 @@ export const Navbar: React.FC<NavbarProps> = ({
     return () => document.removeEventListener('mousedown', handleOutside);
   }, []);
 
-  const isAdmin = !!currentUser?.isAdmin || currentUser?.role === 'Admin';
+  // Show admin navigation strictly to backend-verified administrators
+  const isAdmin = currentUser?.isAdmin === true;
 
   const navItems: { route: PageRoute; label: string; icon: React.ReactNode }[] = [
+    ...(isAdmin
+      ? [{ route: 'admin' as PageRoute, label: 'Admin', icon: <ShieldCheck className="w-4 h-4 text-amber-500" /> }]
+      : []),
     { route: 'dashboard', label: 'Dashboard', icon: <Layers className="w-4 h-4" /> },
     { route: 'marketplace', label: 'Marketplace', icon: <Database className="w-4 h-4" /> },
     { route: 'upload', label: 'Upload', icon: <Upload className="w-4 h-4" /> },
@@ -59,9 +63,6 @@ export const Navbar: React.FC<NavbarProps> = ({
     { route: 'my-datasets', label: 'My Datasets', icon: <FolderKanban className="w-4 h-4" /> },
     { route: 'query-history', label: 'History', icon: <History className="w-4 h-4" /> },
     { route: 'wallet', label: 'Wallet', icon: <Wallet className="w-4 h-4" /> },
-    ...(isAdmin
-      ? [{ route: 'admin' as PageRoute, label: 'Admin', icon: <ShieldCheck className="w-4 h-4 text-amber-500" /> }]
-      : []),
   ];
 
   return (

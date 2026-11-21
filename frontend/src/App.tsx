@@ -51,8 +51,61 @@ const PROTECTED_ROUTES: PageRoute[] = [
   'admin',
 ];
 
+const ROUTE_TO_PATH: Record<PageRoute, string> = {
+  landing: '/',
+  login: '/login',
+  dashboard: '/dashboard',
+  marketplace: '/marketplace',
+  'dataset-detail': '/dataset',
+  upload: '/upload',
+  query: '/query',
+  'query-history': '/query-history',
+  'my-datasets': '/my-datasets',
+  'versions-improve': '/versions-improve',
+  wallet: '/wallet',
+  profile: '/profile',
+  admin: '/admin',
+  '404': '/404',
+};
+
+function getRouteFromPathname(pathname: string): PageRoute {
+  const clean = (pathname || '/').replace(/\/+$/, '') || '/';
+  switch (clean) {
+    case '/':
+      return 'landing';
+    case '/login':
+      return 'login';
+    case '/dashboard':
+      return 'dashboard';
+    case '/marketplace':
+      return 'marketplace';
+    case '/dataset':
+      return 'dataset-detail';
+    case '/upload':
+      return 'upload';
+    case '/query':
+      return 'query';
+    case '/query-history':
+      return 'query-history';
+    case '/my-datasets':
+      return 'my-datasets';
+    case '/versions-improve':
+      return 'versions-improve';
+    case '/wallet':
+      return 'wallet';
+    case '/profile':
+      return 'profile';
+    case '/admin':
+      return 'admin';
+    default:
+      return 'landing';
+  }
+}
+
 export default function App() {
-  const [currentRoute, setCurrentRoute] = useState<PageRoute>('landing');
+  const [currentRoute, setCurrentRoute] = useState<PageRoute>(() =>
+    typeof window !== 'undefined' ? getRouteFromPathname(window.location.pathname) : 'landing'
+  );
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => !!api.auth.getToken());
   const [isAuthRestoring, setIsAuthRestoring] = useState<boolean>(true);
 
@@ -186,7 +239,15 @@ export default function App() {
 
         setCurrentUser(restoredAccount);
         setIsAuthenticated(true);
-        setCurrentRoute((curr) => (curr === 'login' ? 'dashboard' : curr));
+        setCurrentRoute((curr) => {
+          if (me.is_admin && (curr === 'login' || curr === 'landing')) {
+            return 'admin';
+          }
+          if (!me.is_admin && curr === 'login') {
+            return 'dashboard';
+          }
+          return curr;
+        });
 
         // Fetch real datasets from backend catalog (replaces state even if empty)
         await refreshDatasets(me.id);
@@ -227,10 +288,33 @@ export default function App() {
     };
   }, []);
 
+  // Keep browser URL synchronized with SPA route and respond to back/forward navigation
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const targetPath = ROUTE_TO_PATH[currentRoute] || '/';
+    if (window.location.pathname !== targetPath) {
+      window.history.pushState({ route: currentRoute }, '', targetPath);
+    }
+  }, [currentRoute]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handlePopState = () => {
+      const next = getRouteFromPathname(window.location.pathname);
+      if (PROTECTED_ROUTES.includes(next) && !isAuthenticated && !api.auth.getToken()) {
+        setCurrentRoute('login');
+        return;
+      }
+      setCurrentRoute(next);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [isAuthenticated]);
+
   // Protected route guard & authenticated login redirect
   const handleNavigate = (route: PageRoute) => {
     if (route === 'login' && (isAuthenticated || !!currentUser || !!api.auth.getToken())) {
-      setCurrentRoute('dashboard');
+      setCurrentRoute(currentUser?.isAdmin ? 'admin' : 'dashboard');
       return;
     }
 
@@ -243,6 +327,17 @@ export default function App() {
       setCurrentRoute('login');
       return;
     }
+
+    if (route === 'admin' && currentUser && !currentUser.isAdmin) {
+      addToast(
+        'ACCESS_DENIED',
+        'Administrative privileges required. Access denied.',
+        'rose'
+      );
+      setCurrentRoute('dashboard');
+      return;
+    }
+
     setCurrentRoute(route);
   };
 
@@ -251,11 +346,12 @@ export default function App() {
     _token: string,
     role: 'Contributor' | 'Data Analyst' = 'Contributor'
   ) => {
+    const isVerifiedAdmin = user.is_admin === true;
     const userAccount: UserAccount = {
       id: user.id,
       name: user.full_name,
       email: user.email,
-      role: user.is_admin ? 'Admin' : role,
+      role: isVerifiedAdmin ? 'Admin' : role,
       credits: user.credits,
       reputationScore: user.reputation_score ?? 50,
       contributedDatasetIds: [],
@@ -263,15 +359,17 @@ export default function App() {
       joinedDate: user.created_at
         ? user.created_at.split('T')[0]
         : new Date().toISOString().split('T')[0],
-      isAdmin: !!user.is_admin,
+      isAdmin: isVerifiedAdmin,
     };
 
     setCurrentUser(userAccount);
     setIsAuthenticated(true);
-    setCurrentRoute('dashboard');
+    setCurrentRoute(isVerifiedAdmin ? 'admin' : 'dashboard');
     addToast(
       'SESSION_ACTIVE',
-      `Welcome, ${user.full_name}! Active session verified.`,
+      isVerifiedAdmin
+        ? `Welcome, ${user.full_name}! Verified Administrator session active.`
+        : `Welcome, ${user.full_name}! Active session verified.`,
       'emerald'
     );
 
@@ -798,6 +896,7 @@ export default function App() {
             onLoginSuccess={handleAuthSuccess}
             onNavigate={handleNavigate}
             isAuthenticated={isAuthenticated}
+            authenticatedRedirectRoute={currentUser?.isAdmin ? 'admin' : 'dashboard'}
           />
         )}
 

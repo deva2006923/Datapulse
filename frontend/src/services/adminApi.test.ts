@@ -107,6 +107,74 @@ describe('Admin API Authorization & Endpoints (Integration)', () => {
     }
   });
 
+  it('normal user named Admin still receives is_admin=false and 403 on admin endpoints', async () => {
+    const unique = Math.random().toString(36).substring(2, 8);
+    const regRes = await api.auth.register({
+      email: `named_admin_${unique}@datapulse.io`,
+      password: 'Password123!',
+      full_name: 'Admin',
+    });
+
+    expect(regRes.user.is_admin).toBe(false);
+
+    try {
+      await api.admin.getOverview();
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(403);
+    }
+
+    try {
+      await api.admin.getUserDetail(regRes.user.id);
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(403);
+    }
+  });
+
+  it('verified administrator can access all admin dashboard endpoints when provisioned', async () => {
+    const adminPassword = process.env.TEST_ADMIN_PASSWORD;
+    if (!adminPassword) {
+      return;
+    }
+
+    const adminEmail = process.env.TEST_ADMIN_EMAIL || 'datapulseapplication@gmail.com';
+    const loginRes = await api.auth.login({
+      email: adminEmail,
+      password: adminPassword,
+    });
+
+    expect(loginRes.user.is_admin).toBe(true);
+
+    const overview = await api.admin.getOverview();
+    expect(overview.total_users).toBeGreaterThanOrEqual(1);
+    expect(typeof overview.total_credits_in_circulation).toBe('number');
+    expect(Array.isArray(overview.recent_activity)).toBe(true);
+
+    const users = await api.admin.getUsers({ page: 1, limit: 10 });
+    expect(users.total).toBeGreaterThanOrEqual(1);
+    const adminRow = users.items.find((u) => u.email.toLowerCase() === adminEmail.toLowerCase());
+    expect(adminRow).toBeDefined();
+    expect(adminRow?.is_admin).toBe(true);
+
+    const detail = await api.admin.getUserDetail(loginRes.user.id);
+    expect(detail.id).toBe(loginRes.user.id);
+    expect(detail.is_admin).toBe(true);
+
+    const datasets = await api.admin.getDatasets({ page: 1, limit: 10 });
+    expect(Array.isArray(datasets.items)).toBe(true);
+
+    const queries = await api.admin.getQueries({ page: 1, limit: 10 });
+    expect(Array.isArray(queries.items)).toBe(true);
+
+    const transactions = await api.admin.getTransactions({ page: 1, limit: 10 });
+    expect(transactions.total).toBeGreaterThanOrEqual(1);
+    expect(transactions.items[0].sender).toBeDefined();
+    expect(transactions.items[0].receiver).toBeDefined();
+  });
+
   it('normal user querying history remains isolated', async () => {
     const unique = Math.random().toString(36).substring(2, 8);
     await api.auth.register({

@@ -346,6 +346,7 @@ export interface AdminOverview {
   total_credits_refunded?: number;
   net_credit_movement?: number;
   net_credit_liability: number;
+  total_credits_in_circulation?: number;
   recent_activity: AdminActivityItem[];
 }
 
@@ -419,6 +420,7 @@ export interface AdminAnalyticsKpis {
   total_credits_refunded: number;
   net_credit_movement: number;
   net_credit_liability: number;
+  total_credits_in_circulation?: number;
   credits_issued_delta_pct?: number | null;
   credits_spent_delta_pct?: number | null;
   credits_earned_by_owners: number;
@@ -649,6 +651,10 @@ export interface AdminTransactionItem {
   user_id: string;
   user_email: string;
   user_name: string;
+  sender?: string;
+  sender_id?: string | null;
+  receiver?: string;
+  receiver_id?: string | null;
   transaction_type: string;
   amount: number;
   balance_impact: string;

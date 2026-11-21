@@ -20,12 +20,14 @@ interface LoginRegisterViewProps {
   ) => void;
   onNavigate: (route: PageRoute) => void;
   isAuthenticated?: boolean;
+  authenticatedRedirectRoute?: PageRoute;
 }
 
 export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
   onLoginSuccess,
   onNavigate,
   isAuthenticated = false,
+  authenticatedRedirectRoute = 'dashboard',
 }) => {
   const [isRegister, setIsRegister] = useState(false);
   const [name, setName] = useState('');
@@ -38,9 +40,9 @@ export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
   // Redirect authenticated user away from login/register view
   React.useEffect(() => {
     if (isAuthenticated || !!api.auth.getToken()) {
-      onNavigate('dashboard');
+      onNavigate(authenticatedRedirectRoute);
     }
-  }, [isAuthenticated, onNavigate]);
+  }, [isAuthenticated, authenticatedRedirectRoute, onNavigate]);
 
   const handleDemoClick = async (demoKey: string) => {
     setIsLoading(true);

@@ -528,6 +528,7 @@ def get_admin_overview(
         total_credits_refunded=total_credits_refunded,
         net_credit_movement=net_credit_movement,
         net_credit_liability=net_credit_liability,
+        total_credits_in_circulation=net_credit_liability,
         recent_activity=recent_activity,
     )
 
@@ -891,6 +892,7 @@ def get_admin_analytics(
             total_credits_refunded=cur_m["refunded"],
             net_credit_movement=cur_m["issued"] - cur_m["spent"],
             net_credit_liability=net_credit_liability,
+            total_credits_in_circulation=net_credit_liability,
             credits_issued_delta_pct=issued_delta,
             credits_spent_delta_pct=spent_delta,
             credits_earned_by_owners=cur_m["owner_earned"],
@@ -1831,25 +1833,168 @@ def _fetch_transactions_with_running_balance(
     )
     rows = cursor.fetchall()
 
-    # Batch resolve dataset names referenced in transaction descriptions
+    # Batch resolve dataset names/owners, query authors, and unlock buyers for sender/receiver attribution
     ds_ids: Set[str] = set()
+    q_ids: Set[str] = set()
+    royalty_ds_ids: Set[str] = set()
     parsed_refs: List[Tuple[Optional[str], Optional[str], Optional[str]]] = []
     for r in rows:
         assoc, ds_id, q_id = _extract_resource_ids(r["description"] or "")
         parsed_refs.append((assoc, ds_id, q_id))
         if ds_id:
             ds_ids.add(ds_id)
-    ds_name_map = _batch_dataset_names(cursor, ds_ids)
+            if (r["transaction_type"] or "").lower() == "unlock_royalty":
+                royalty_ds_ids.add(ds_id)
+        if q_id:
+            q_ids.add(q_id)
+
+    ds_name_map: Dict[str, str] = {}
+    ds_owner_map: Dict[str, Tuple[str, str, str]] = {}
+    if ds_ids:
+        ph = ",".join("?" for _ in ds_ids)
+        cursor.execute(
+            f"""
+            SELECT d.id, d.name, d.user_id AS owner_id, u.full_name AS owner_name, u.email AS owner_email
+            FROM datasets d
+            LEFT JOIN users u ON d.user_id = u.id
+            WHERE d.id IN ({ph})
+            """,
+            list(ds_ids),
+        )
+        for dr in cursor.fetchall():
+            ds_name_map[dr["id"]] = dr["name"]
+            if dr["owner_id"]:
+                ds_owner_map[dr["id"]] = (
+                    dr["owner_id"],
+                    dr["owner_name"] or dr["owner_id"],
+                    dr["owner_email"] or "",
+                )
+
+    q_user_map: Dict[str, Tuple[str, str, str]] = {}
+    if q_ids:
+        ph = ",".join("?" for _ in q_ids)
+        cursor.execute(
+            f"""
+            SELECT q.id, q.user_id, u.full_name, u.email
+            FROM queries q
+            LEFT JOIN users u ON q.user_id = u.id
+            WHERE q.id IN ({ph})
+            """,
+            list(q_ids),
+        )
+        for qr in cursor.fetchall():
+            if qr["user_id"]:
+                q_user_map[qr["id"]] = (
+                    qr["user_id"],
+                    qr["full_name"] or qr["user_id"],
+                    qr["email"] or "",
+                )
+
+    unlock_buyers_by_ds: Dict[str, List[Tuple[str, str, str]]] = {}
+    if royalty_ds_ids:
+        ph = ",".join("?" for _ in royalty_ds_ids)
+        cursor.execute(
+            f"""
+            SELECT du.dataset_id, du.user_id, u.full_name, u.email
+            FROM dataset_unlocks du
+            LEFT JOIN users u ON du.user_id = u.id
+            WHERE du.dataset_id IN ({ph})
+            ORDER BY {_norm_ts_sql('du.created_at')} DESC
+            """,
+            list(royalty_ds_ids),
+        )
+        for ur in cursor.fetchall():
+            unlock_buyers_by_ds.setdefault(ur["dataset_id"], []).append(
+                (ur["user_id"], ur["full_name"] or ur["user_id"], ur["email"] or "")
+            )
+
+    def _fmt_party(name: str, email: str) -> str:
+        return f"{name} ({email})" if email else name
 
     items = []
     for r, (assoc, ds_id, q_id) in zip(rows, parsed_refs):
         amount = int(r["amount"] or 0)
         impact = f"+{amount}" if amount > 0 else f"{amount}"
+        tx_type = (r["transaction_type"] or "").lower()
+        user_label = _fmt_party(r["user_name"], r["user_email"])
+        desc = r["description"] or ""
+
+        sender = "DataPulse Platform"
+        sender_id: Optional[str] = None
+        receiver = "DataPulse Platform"
+        receiver_id: Optional[str] = None
+
+        if tx_type == "query_fee":
+            sender = user_label
+            sender_id = r["user_id"]
+            if ds_id and ds_id in ds_owner_map:
+                oid, oname, oemail = ds_owner_map[ds_id]
+                receiver = _fmt_party(oname, oemail)
+                receiver_id = oid
+            else:
+                receiver = "DataPulse Marketplace"
+        elif tx_type == "query_reward":
+            if q_id and q_id in q_user_map:
+                qid_u, qname, qemail = q_user_map[q_id]
+                sender = _fmt_party(qname, qemail)
+                sender_id = qid_u
+            else:
+                sender = "DataPulse Marketplace"
+            receiver = user_label
+            receiver_id = r["user_id"]
+        elif tx_type == "dataset_unlock":
+            sender = user_label
+            sender_id = r["user_id"]
+            if ds_id and ds_id in ds_owner_map:
+                oid, oname, oemail = ds_owner_map[ds_id]
+                receiver = _fmt_party(oname, oemail)
+                receiver_id = oid
+            else:
+                receiver = "DataPulse Marketplace"
+        elif tx_type == "unlock_royalty":
+            matched_buyer = None
+            by_idx = desc.rfind(" by ")
+            buyer_name_hint = desc[by_idx + 4:].strip().lower() if by_idx != -1 else ""
+            if ds_id and ds_id in unlock_buyers_by_ds:
+                candidates = unlock_buyers_by_ds[ds_id]
+                if buyer_name_hint:
+                    matched_buyer = next(
+                        (c for c in candidates if c[1].strip().lower() == buyer_name_hint),
+                        None,
+                    )
+                if not matched_buyer and candidates:
+                    matched_buyer = candidates[0]
+            if matched_buyer:
+                sender = _fmt_party(matched_buyer[1], matched_buyer[2])
+                sender_id = matched_buyer[0]
+            elif by_idx != -1 and desc[by_idx + 4:].strip():
+                sender = desc[by_idx + 4:].strip()
+            else:
+                sender = "Marketplace Buyer"
+            receiver = user_label
+            receiver_id = r["user_id"]
+        elif tx_type == "redeem":
+            sender = user_label
+            sender_id = r["user_id"]
+            receiver = "Payout Redemption"
+        elif amount >= 0:
+            sender = "DataPulse Platform"
+            receiver = user_label
+            receiver_id = r["user_id"]
+        else:
+            sender = user_label
+            sender_id = r["user_id"]
+            receiver = "DataPulse Platform"
+
         items.append(AdminTransactionItem(
             id=r["id"],
             user_id=r["user_id"],
             user_email=r["user_email"],
             user_name=r["user_name"],
+            sender=sender,
+            sender_id=sender_id,
+            receiver=receiver,
+            receiver_id=receiver_id,
             transaction_type=r["transaction_type"],
             amount=amount,
             balance_impact=impact,
@@ -1858,7 +2003,7 @@ def _fetch_transactions_with_running_balance(
             related_dataset_id=ds_id,
             related_dataset_name=ds_name_map.get(ds_id) if ds_id else None,
             related_query_id=q_id,
-            description=r["description"] or "",
+            description=desc,
             status=r["status"] or "completed",
             timestamp=r["created_at"],
         ))

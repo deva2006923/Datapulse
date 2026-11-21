@@ -267,6 +267,7 @@ class AdminOverviewResponse(BaseModel):
     total_credits_refunded: int = 0
     net_credit_movement: int = 0
     net_credit_liability: int
+    total_credits_in_circulation: int = 0
     recent_activity: List[AdminActivityItem]
 
 
@@ -340,6 +341,7 @@ class AdminAnalyticsKpis(BaseModel):
     total_credits_refunded: int = 0
     net_credit_movement: int
     net_credit_liability: int
+    total_credits_in_circulation: int = 0
     credits_issued_delta_pct: Optional[float] = None
     credits_spent_delta_pct: Optional[float] = None
     credits_earned_by_owners: int = 0
@@ -530,6 +532,10 @@ class AdminTransactionItem(BaseModel):
     user_id: str
     user_email: str
     user_name: str
+    sender: str = "DataPulse Platform"
+    sender_id: Optional[str] = None
+    receiver: str = "DataPulse Platform"
+    receiver_id: Optional[str] = None
     transaction_type: str
     amount: int
     balance_impact: str
