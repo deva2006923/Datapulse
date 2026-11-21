@@ -5,8 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
 from app.database import init_db
+from app.services.admin_bootstrap import ensure_default_admin
 from app.services.storage import init_storage
-from app.routers import health, auth, datasets, query, credits, user, admin, admin_bootstrap
+from app.routers import health, auth, datasets, query, credits, user, admin
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +30,8 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("Initializing DataPulse Analytical Storage...")
     init_storage()
+    logger.info("Verifying default administrator account...")
+    ensure_default_admin()
 
     if settings.is_production:
         if not settings.SECRET_KEY or settings.SECRET_KEY.strip() in _INSECURE_SECRET_DEFAULTS or len(settings.SECRET_KEY.strip()) < 32:
@@ -89,7 +92,6 @@ app.include_router(query.router)
 app.include_router(credits.router)
 app.include_router(user.router)
 app.include_router(admin.router)
-app.include_router(admin_bootstrap.router)
 
 if __name__ == "__main__":
     import uvicorn

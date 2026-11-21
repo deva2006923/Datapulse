@@ -152,13 +152,6 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(admin_user_id) REFERENCES users(id)
     );
-
-    CREATE TABLE IF NOT EXISTS admin_bootstrap_state (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        consumed INTEGER NOT NULL DEFAULT 0,
-        consumed_by_user_id TEXT,
-        consumed_at TIMESTAMP
-    );
     """)
 
     # Safe column migrations on existing tables

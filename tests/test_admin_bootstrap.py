@@ -1,133 +1,199 @@
-import secrets
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-
 import pytest
 from starlette.testclient import TestClient
 
 from app.config import settings
 from app.database import get_db_connection
 from app.main import app
+from app.services.admin_bootstrap import ensure_default_admin
 
 
-STRONG_TOKEN = secrets.token_urlsafe(48)
 ADMIN_EMAIL = "datapulseapplication@gmail.com"
 
 
-def _reset_bootstrap_and_admin():
+def _clear_admin_user():
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM admin_bootstrap_state")
-    cur.execute("DELETE FROM tokens WHERE user_id IN (SELECT id FROM users WHERE LOWER(email) = ?)", (ADMIN_EMAIL,))
+    cur.execute(
+        "DELETE FROM tokens WHERE user_id IN (SELECT id FROM users WHERE LOWER(email) = ?)",
+        (ADMIN_EMAIL,),
+    )
     cur.execute("DELETE FROM users WHERE LOWER(email) = ?", (ADMIN_EMAIL,))
     conn.commit()
 
 
-def _register_user(client, email: str, password: str = "ExistingPass123!", full_name: str = "Admin"):
-    res = client.post(
-        "/auth/register",
-        json={"email": email, "password": password, "full_name": full_name},
-    )
-    assert res.status_code == 201
-    return res.json()
-
-
 @pytest.fixture(autouse=True)
-def restore_settings_after_test():
-    orig_token = settings.ADMIN_BOOTSTRAP_TOKEN
+def restore_admin_settings():
     orig_email = settings.ADMIN_EMAIL
+    orig_password = settings.ADMIN_PASSWORD
     settings.ADMIN_EMAIL = ADMIN_EMAIL
-    _reset_bootstrap_and_admin()
+    settings.ADMIN_PASSWORD = None
+    _clear_admin_user()
     yield
-    settings.ADMIN_BOOTSTRAP_TOKEN = orig_token
     settings.ADMIN_EMAIL = orig_email
-    _reset_bootstrap_and_admin()
+    settings.ADMIN_PASSWORD = orig_password
+    _clear_admin_user()
 
 
-def test_bootstrap_disabled_when_token_absent_or_weak(client):
-    _register_user(client, ADMIN_EMAIL)
-
-    # Absent token -> 404 disabled
-    settings.ADMIN_BOOTSTRAP_TOKEN = None
+def test_temporary_bootstrap_endpoint_is_removed(client):
     res = client.post(
         "/admin/bootstrap/activate",
         json={"email": ADMIN_EMAIL},
-        headers={"X-Forwarded-Proto": "https", "X-Admin-Bootstrap-Token": STRONG_TOKEN},
+        headers={"X-Forwarded-Proto": "https", "X-Admin-Bootstrap-Token": "x" * 48},
     )
     assert res.status_code == 404
 
-    # Weak token (< 32 chars) -> 404 disabled
-    settings.ADMIN_BOOTSTRAP_TOKEN = "short-weak-token"
-    res_weak = client.post(
-        "/admin/bootstrap/activate",
-        json={"email": ADMIN_EMAIL},
-        headers={"X-Forwarded-Proto": "https", "X-Admin-Bootstrap-Token": "short-weak-token"},
-    )
-    assert res_weak.status_code == 404
+
+def test_first_time_startup_provisioning_creates_hashed_admin():
+    settings.ADMIN_EMAIL = ADMIN_EMAIL
+    settings.ADMIN_PASSWORD = "StrongStartupAdminPass123!"
+
+    # Entering TestClient triggers FastAPI lifespan startup -> ensure_default_admin()
+    with TestClient(app) as client:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, email, password_hash, full_name, credits, is_admin FROM users WHERE LOWER(email) = ?",
+            (ADMIN_EMAIL,),
+        )
+        rows = cur.fetchall()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["is_admin"] == 1
+        assert row["password_hash"] != "StrongStartupAdminPass123!"
+        assert len(row["password_hash"]) == 64  # SHA-256 hex digest
+
+        # Admin can log in and access admin dashboard endpoints
+        login_res = client.post(
+            "/auth/login",
+            json={"email": ADMIN_EMAIL, "password": "StrongStartupAdminPass123!"},
+        )
+        assert login_res.status_code == 200
+        body = login_res.json()
+        assert body["user"]["is_admin"] is True
+        assert "StrongStartupAdminPass123!" not in login_res.text
+
+        headers = {"Authorization": f"Bearer {body['access_token']}"}
+        ov_res = client.get("/admin/overview", headers=headers)
+        assert ov_res.status_code == 200
+        assert "StrongStartupAdminPass123!" not in ov_res.text
+
+        # Public registration with the admin email is blocked (400) because built-in admin exists
+        dup_reg = client.post(
+            "/auth/register",
+            json={
+                "email": ADMIN_EMAIL.upper(),
+                "password": "AttackerPassword123!",
+                "full_name": "Impersonator",
+            },
+        )
+        assert dup_reg.status_code == 400
 
 
-def test_bootstrap_requires_https_and_rejects_query_params(client):
-    _register_user(client, ADMIN_EMAIL)
-    settings.ADMIN_BOOTSTRAP_TOKEN = STRONG_TOKEN
+def test_repeated_startup_is_idempotent_and_never_creates_duplicates():
+    settings.ADMIN_EMAIL = ADMIN_EMAIL
+    settings.ADMIN_PASSWORD = "RepeatStartupPassword123!"
 
-    # Plain HTTP (no X-Forwarded-Proto: https and http:// base URL) -> 403
-    res_http = client.post(
-        "/admin/bootstrap/activate",
-        json={"email": ADMIN_EMAIL},
-        headers={"X-Admin-Bootstrap-Token": STRONG_TOKEN},
-    )
-    assert res_http.status_code == 403
+    first = ensure_default_admin()
+    assert first["status"] == "created"
+    assert first["is_admin"] is True
 
-    # Token passed in URL query string -> 403 rejected
-    res_qp = client.post(
-        f"/admin/bootstrap/activate?token={STRONG_TOKEN}",
-        json={"email": ADMIN_EMAIL},
-        headers={"X-Forwarded-Proto": "https", "X-Admin-Bootstrap-Token": STRONG_TOKEN},
-    )
-    assert res_qp.status_code == 403
-
-
-def test_bootstrap_rejects_wrong_token_and_wrong_email(client):
-    reg_admin = _register_user(client, ADMIN_EMAIL)
-    other_email = f"other_{uuid.uuid4().hex[:6]}@datapulse.test"
-    reg_other = _register_user(client, other_email, full_name="Other User")
-    settings.ADMIN_BOOTSTRAP_TOKEN = STRONG_TOKEN
-
-    # Wrong token -> 403
-    res_wrong_tok = client.post(
-        "/admin/bootstrap/activate",
-        json={"email": ADMIN_EMAIL},
-        headers={"X-Forwarded-Proto": "https", "X-Admin-Bootstrap-Token": secrets.token_urlsafe(48)},
-    )
-    assert res_wrong_tok.status_code == 403
-    assert STRONG_TOKEN not in res_wrong_tok.text
-
-    # Wrong email with valid token -> 403 and does NOT promote other user
-    res_wrong_email = client.post(
-        "/admin/bootstrap/activate",
-        json={"email": other_email},
-        headers={"X-Forwarded-Proto": "https", "X-Admin-Bootstrap-Token": STRONG_TOKEN},
-    )
-    assert res_wrong_email.status_code == 403
-
-    # Neither account was promoted
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT is_admin FROM users WHERE id = ?", (reg_other["user"]["id"],))
-    assert cur.fetchone()["is_admin"] == 0
-    cur.execute("SELECT is_admin FROM users WHERE id = ?", (reg_admin["user"]["id"],))
-    assert cur.fetchone()["is_admin"] == 0
-
-
-def test_bootstrap_does_not_create_missing_user(client):
-    settings.ADMIN_BOOTSTRAP_TOKEN = STRONG_TOKEN
-
-    res = client.post(
-        "/admin/bootstrap/activate",
-        json={"email": ADMIN_EMAIL},
-        headers={"X-Forwarded-Proto": "https", "X-Admin-Bootstrap-Token": STRONG_TOKEN},
+    cur.execute(
+        "SELECT id, password_hash, credits, full_name, created_at FROM users WHERE LOWER(email) = ?",
+        (ADMIN_EMAIL,),
     )
-    assert res.status_code == 404
+    snap_1 = dict(cur.fetchone())
+
+    # Simulate repeated startups (both direct call and full lifespan re-entry)
+    second = ensure_default_admin()
+    assert second["status"] == "unchanged"
+    assert second["id"] == first["id"]
+
+    with TestClient(app):
+        pass
+
+    cur.execute(
+        "SELECT id, password_hash, credits, full_name, created_at FROM users WHERE LOWER(email) = ?",
+        (ADMIN_EMAIL,),
+    )
+    rows = cur.fetchall()
+    assert len(rows) == 1
+    assert dict(rows[0]) == snap_1
+
+
+def test_existing_account_promoted_without_resetting_password_or_credits(client):
+    # Pre-existing account registered with is_admin = 0, custom password, name, and credits
+    reg_res = client.post(
+        "/auth/register",
+        json={
+            "email": ADMIN_EMAIL,
+            "password": "OriginalExistingPassword99!",
+            "full_name": "Admin",
+        },
+    )
+    assert reg_res.status_code == 201
+    user_id = reg_res.json()["user"]["id"]
+    assert reg_res.json()["user"]["is_admin"] is False
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET credits = 345 WHERE id = ?", (user_id,))
+    conn.commit()
+    cur.execute("SELECT password_hash, credits, full_name FROM users WHERE id = ?", (user_id,))
+    before = dict(cur.fetchone())
+
+    # Startup runs even with a DIFFERENT ADMIN_PASSWORD configured in env
+    settings.ADMIN_EMAIL = ADMIN_EMAIL
+    settings.ADMIN_PASSWORD = "DifferentEnvPassword456!"
+
+    result = ensure_default_admin()
+    assert result["status"] == "promoted"
+    assert result["id"] == user_id
+    assert result["is_admin"] is True
+
+    # Password hash, credits, full_name, and user count are strictly preserved
+    cur.execute(
+        "SELECT id, password_hash, credits, full_name, is_admin FROM users WHERE LOWER(email) = ?",
+        (ADMIN_EMAIL,),
+    )
+    rows = cur.fetchall()
+    assert len(rows) == 1
+    after = dict(rows[0])
+    assert after["is_admin"] == 1
+    assert after["password_hash"] == before["password_hash"]
+    assert after["credits"] == 345
+    assert after["full_name"] == "Admin"
+
+    # Original password still logs in with is_admin = True
+    ok_login = client.post(
+        "/auth/login",
+        json={"email": ADMIN_EMAIL, "password": "OriginalExistingPassword99!"},
+    )
+    assert ok_login.status_code == 200
+    assert ok_login.json()["user"]["is_admin"] is True
+
+    # Different env password does NOT work (password was NOT reset)
+    bad_login = client.post(
+        "/auth/login",
+        json={"email": ADMIN_EMAIL, "password": "DifferentEnvPassword456!"},
+    )
+    assert bad_login.status_code == 401
+
+
+def test_startup_skips_creation_when_password_missing_or_weak():
+    settings.ADMIN_EMAIL = ADMIN_EMAIL
+
+    # Missing ADMIN_PASSWORD
+    settings.ADMIN_PASSWORD = None
+    res_missing = ensure_default_admin()
+    assert res_missing["status"] == "skipped_missing_password"
+
+    # Weak ADMIN_PASSWORD (< 8 chars)
+    settings.ADMIN_PASSWORD = "short"
+    res_weak = ensure_default_admin()
+    assert res_weak["status"] == "skipped_weak_password"
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -135,115 +201,33 @@ def test_bootstrap_does_not_create_missing_user(client):
     assert cur.fetchone()["cnt"] == 0
 
 
-def test_bootstrap_promotes_existing_account_once_preserves_fields_and_blocks_repeat(client):
-    reg_admin = _register_user(client, ADMIN_EMAIL, password="MyExistingPassword99!", full_name="Admin")
-    other_email = f"regular_{uuid.uuid4().hex[:6]}@datapulse.test"
-    reg_other = _register_user(client, other_email, password="RegularUserPass1!", full_name="Regular User")
-    settings.ADMIN_BOOTSTRAP_TOKEN = STRONG_TOKEN
+def test_ordinary_users_cannot_gain_admin_access(client):
+    settings.ADMIN_EMAIL = ADMIN_EMAIL
+    settings.ADMIN_PASSWORD = "ProvisionedOwnerPass123!"
+    ensure_default_admin()
 
-    # Before promotion: account cannot access admin APIs
-    pre_me = client.get("/auth/me", headers={"Authorization": f"Bearer {reg_admin['access_token']}"})
-    assert pre_me.status_code == 200
-    assert pre_me.json()["is_admin"] is False
-    pre_admin = client.get("/admin/overview", headers={"Authorization": f"Bearer {reg_admin['access_token']}"})
-    assert pre_admin.status_code == 403
-
-    # Snapshot password hash, credits, and user count before activation
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT password_hash, credits, full_name FROM users WHERE id = ?", (reg_admin["user"]["id"],))
-    before = dict(cur.fetchone())
-    cur.execute("SELECT COUNT(*) AS cnt FROM users")
-    user_count_before = cur.fetchone()["cnt"]
-
-    # Activate via HTTPS POST + header token
-    act_res = client.post(
-        "/admin/bootstrap/activate",
-        json={"email": ADMIN_EMAIL.upper()},  # case-insensitive match
-        headers={"X-Forwarded-Proto": "https", "X-Admin-Bootstrap-Token": STRONG_TOKEN},
+    # Register an ordinary user (even naming themselves "Admin")
+    other_email = f"regular_{uuid.uuid4().hex[:8]}@datapulse.io"
+    reg = client.post(
+        "/auth/register",
+        json={
+            "email": other_email,
+            "password": "RegularUserPass123!",
+            "full_name": "Admin",
+        },
     )
-    assert act_res.status_code == 200
-    body = act_res.json()
-    assert body["status"] == "activated"
-    assert body["email"] == ADMIN_EMAIL
-    assert body["is_admin"] is True
+    assert reg.status_code == 201
+    assert reg.json()["user"]["is_admin"] is False
+    headers = {"Authorization": f"Bearer {reg.json()['access_token']}"}
 
-    # Never returns passwords, tokens, or secrets
-    raw = act_res.text
-    assert STRONG_TOKEN not in raw
-    assert "MyExistingPassword99!" not in raw
-    assert before["password_hash"] not in raw
-    assert reg_admin["access_token"] not in raw
-
-    # Only users.is_admin changed; password, credits, name, and user count unchanged
-    cur.execute("SELECT password_hash, credits, full_name, is_admin FROM users WHERE id = ?", (reg_admin["user"]["id"],))
-    after = dict(cur.fetchone())
-    assert after["is_admin"] == 1
-    assert after["password_hash"] == before["password_hash"]
-    assert after["credits"] == before["credits"]
-    assert after["full_name"] == before["full_name"]
-
-    cur.execute("SELECT COUNT(*) AS cnt FROM users")
-    assert cur.fetchone()["cnt"] == user_count_before
-
-    # Audit log recorded without storing bootstrap token
-    cur.execute(
-        "SELECT action, admin_email, details FROM admin_audit_logs WHERE action = 'ADMIN_BOOTSTRAP_ACTIVATE' ORDER BY created_at DESC LIMIT 1"
-    )
-    audit = cur.fetchone()
-    assert audit is not None
-    assert audit["admin_email"] == ADMIN_EMAIL
-    assert STRONG_TOKEN not in (audit["details"] or "")
-
-    # Existing password still works for login and grants admin dashboard access
-    login_res = client.post(
-        "/auth/login",
-        json={"email": ADMIN_EMAIL, "password": "MyExistingPassword99!"},
-    )
-    assert login_res.status_code == 200
-    assert login_res.json()["user"]["is_admin"] is True
-    admin_headers = {"Authorization": f"Bearer {login_res.json()['access_token']}"}
-    assert client.get("/admin/overview", headers=admin_headers).status_code == 200
-
-    # Normal user still receives 403 on admin endpoints
-    other_headers = {"Authorization": f"Bearer {reg_other['access_token']}"}
-    assert client.get("/admin/overview", headers=other_headers).status_code == 403
-    assert client.get("/admin/users", headers=other_headers).status_code == 403
-
-    # Repeated activation is rejected (endpoint now disabled -> 404)
-    repeat_res = client.post(
-        "/admin/bootstrap/activate",
-        json={"email": ADMIN_EMAIL},
-        headers={"X-Forwarded-Proto": "https", "X-Admin-Bootstrap-Token": STRONG_TOKEN},
-    )
-    assert repeat_res.status_code == 404
-
-
-def test_bootstrap_concurrent_requests_only_succeed_once():
-    setup_client = TestClient(app)
-    _register_user(setup_client, ADMIN_EMAIL)
-    other_email = f"concurrent_{uuid.uuid4().hex[:6]}@datapulse.test"
-    reg_other = _register_user(setup_client, other_email, full_name="Bystander")
-    settings.ADMIN_BOOTSTRAP_TOKEN = STRONG_TOKEN
-
-    def attempt(_idx: int):
-        with TestClient(app, base_url="https://testserver") as c:
-            return c.post(
-                "/admin/bootstrap/activate",
-                json={"email": ADMIN_EMAIL},
-                headers={"X-Admin-Bootstrap-Token": STRONG_TOKEN},
-            ).status_code
-
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        codes = list(pool.map(attempt, range(6)))
-
-    assert codes.count(200) == 1
-    assert all(code in (200, 404, 409) for code in codes)
-
-    # Exactly one admin exists and bystander was never promoted
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT is_admin FROM users WHERE id = ?", (reg_other["user"]["id"],))
-    assert cur.fetchone()["is_admin"] == 0
-    cur.execute("SELECT COUNT(*) AS cnt FROM admin_bootstrap_state WHERE consumed = 1")
-    assert cur.fetchone()["cnt"] == 1
+    # Verify /auth/me reports is_admin = False and all admin endpoints reject with 403
+    assert client.get("/auth/me", headers=headers).json()["is_admin"] is False
+    for path in (
+        "/admin/overview",
+        "/admin/users",
+        "/admin/datasets",
+        "/admin/queries",
+        "/admin/transactions",
+    ):
+        r = client.get(path, headers=headers)
+        assert r.status_code == 403

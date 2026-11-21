@@ -30,10 +30,9 @@ class Settings(BaseSettings):
     QUERY_COST: int = 1
     DATASET_OWNER_REWARD: int = 1
 
-    # Administrator Authorization
+    # Administrator Authorization & Default Provisioning
     ADMIN_EMAIL: str = "datapulseapplication@gmail.com"
-    # Temporary one-time activation token (disabled whenever unset or <32 chars)
-    ADMIN_BOOTSTRAP_TOKEN: Optional[str] = None
+    ADMIN_PASSWORD: Optional[str] = None
 
     SECRET_KEY: str = "datapulse-production-secret-key-replace-in-env"
     DATABASE_PATH: str = "datapulse.db"

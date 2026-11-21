@@ -56,9 +56,10 @@ Before creating the production backend service:
      CORS_ORIGINS=https://datapulse.ai.studio,https://your-project.vercel.app
      ```
    - Leave `CORS_ORIGIN_REGEX` empty (`""`) in production unless preview subdomains are explicitly required.
-4. **Admin Security**
-   - Keep `ADMIN_EMAIL=datapulseapplication@gmail.com`.
-   - Public `/auth/register` always creates `is_admin = 0`; admin privileges can only be granted via `scripts/init_admin.py` executed directly against the production database.
+4. **Admin Security & Default Provisioning**
+   - Set `ADMIN_EMAIL=datapulseapplication@gmail.com` and a strong `ADMIN_PASSWORD` (at least 8 characters) in Render/Railway backend environment variables (never commit real passwords to GitHub).
+   - On backend startup, DataPulse idempotently provisions this built-in administrator account if absent, or ensures `is_admin = 1` on the existing account without resetting its password, credits, or profile.
+   - Public `/auth/register` always creates `is_admin = 0`; ordinary users can never obtain administrator privileges via registration or API tampering.
 
 ---
 
@@ -115,25 +116,21 @@ Expected HTTP `200 OK`:
 
 ---
 
-## 5. Production Administrator Initialization
+## 5. Production Administrator Provisioning (Automatic on Startup)
 
-> **CRITICAL:** Local development databases are never uploaded to production. You must initialize the administrator directly on the live production persistent volume.
+DataPulse automatically provisions and verifies the built-in platform administrator during backend startup — **no Render Shell access is required**.
 
-1. Open the **Render Shell** (or `railway run bash`) for `datapulse-backend`.
-2. Confirm persistent env vars point to `/var/data`:
-   ```bash
-   echo "$DATABASE_PATH"   # Must output: /var/data/datapulse.db
-   ```
-3. Run the secure bootstrap script (prompts interactively for password without echoing it to shell history):
-   ```bash
-   python scripts/init_admin.py --email datapulseapplication@gmail.com
-   ```
-   Or if promoting an already-registered production account without changing its password:
-   ```bash
-   python scripts/init_admin.py --email datapulseapplication@gmail.com --promote
-   ```
-4. Verify output confirms:
-   `Administrative status verified: is_admin = 1`
+1. In your **Render Dashboard -> Service -> Environment** (or Railway Variables), set:
+   - `ADMIN_EMAIL` = `datapulseapplication@gmail.com`
+   - `ADMIN_PASSWORD` = `<strong-password-at-least-8-chars>` *(never commit to GitHub or share in logs)*
+2. Deploy or restart the backend service.
+3. On startup (`lifespan`), DataPulse runs `ensure_default_admin()`:
+   - **If `datapulseapplication@gmail.com` does not exist:** creates the account with a securely hashed password and `is_admin = 1`.
+   - **If `datapulseapplication@gmail.com` already exists:** ensures `is_admin = 1` while preserving the existing password, credit balance, and profile data.
+   - **Idempotent:** repeated restarts never create duplicate administrator accounts or reset credentials.
+4. Sign in on the frontend using `datapulseapplication@gmail.com` to access the Admin Dashboard (`/admin`).
+
+*(For local or shell-enabled environments, `python scripts/init_admin.py --email datapulseapplication@gmail.com --promote` also remains available.)*
 
 Never hardcode admin passwords in `render.yaml`, `Dockerfile`, scripts, or GitHub.
 
