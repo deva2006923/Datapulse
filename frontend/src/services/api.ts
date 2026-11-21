@@ -34,10 +34,25 @@ import { backendQueryHistoryItemToQueryHistoryItem } from './datasetAdapter';
 
 const TOKEN_STORAGE_KEY = 'datapulse_auth_token';
 
-// Base API URL with local development fallback to http://localhost:8000
-export const API_BASE_URL = (
-  import.meta.env.VITE_API_URL || 'http://localhost:8000'
-).replace(/\/+$/, '');
+// Base API URL:
+// - In production builds (Vercel), VITE_API_URL MUST be set to the hosted HTTPS backend URL.
+// - In local development and tests, falls back cleanly to http://localhost:8000.
+function resolveApiBaseUrl(): string {
+  const configured = (import.meta.env.VITE_API_URL || '').trim();
+  if (configured) {
+    return configured.replace(/\/+$/, '');
+  }
+  if (import.meta.env.PROD) {
+    console.error(
+      '[DataPulse] VITE_API_URL is not configured for this production build. ' +
+        'Set VITE_API_URL in Vercel Environment Variables to your hosted HTTPS backend URL.'
+    );
+    return '';
+  }
+  return 'http://localhost:8000';
+}
+
+export const API_BASE_URL = resolveApiBaseUrl();
 
 export class ApiError extends Error {
   status: number;
@@ -109,6 +124,12 @@ async function request<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
+  if (!API_BASE_URL) {
+    throw new ApiError(
+      'Backend API URL is not configured (VITE_API_URL missing in production environment).',
+      0
+    );
+  }
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   const url = `${API_BASE_URL}${normalizedPath}`;
 

@@ -6,9 +6,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Server Settings
+    ENVIRONMENT: str = "development"
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     VERSION: str = "1.0.0"
+
+    # Upload Limits
+    MAX_UPLOAD_SIZE_MB: int = 25
 
     # CORS Settings
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,https://datapulse.ai.studio"
@@ -39,6 +43,14 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore"
     )
+
+    @property
+    def is_production(self) -> bool:
+        return (self.ENVIRONMENT or "").strip().lower() == "production"
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return max(1, int(self.MAX_UPLOAD_SIZE_MB)) * 1024 * 1024
 
     @property
     def cors_origins_list(self) -> List[str]:

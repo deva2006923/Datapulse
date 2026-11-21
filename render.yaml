@@ -1,0 +1,54 @@
+# Render Blueprint for DataPulse Backend (FastAPI + SQLite + DuckDB + CSV storage)
+# IMPORTANT: Persistent disks require a paid Render instance (Starter plan or higher).
+# DuckDB holds a single-process file lock, so Uvicorn MUST run with --workers 1.
+
+services:
+  - type: web
+    name: datapulse-backend
+    runtime: python
+    plan: starter
+    region: oregon
+    branch: main
+    autoDeploy: true
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips="*"
+    healthCheckPath: /health
+    disk:
+      name: datapulse-persistent-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: ENVIRONMENT
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: MAX_UPLOAD_SIZE_MB
+        value: "25"
+      - key: DATABASE_PATH
+        value: /var/data/datapulse.db
+      - key: DUCKDB_PATH
+        value: /var/data/datapulse_analytics.duckdb
+      - key: DATASETS_STORAGE_DIR
+        value: /var/data/datasets
+      - key: EMBEDDINGS_ENABLED
+        value: "false"
+      - key: AI_PROVIDER
+        value: gemini
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: ADMIN_EMAIL
+        value: datapulseapplication@gmail.com
+      - key: CORS_ORIGINS
+        value: https://datapulse.ai.studio
+      - key: CORS_ORIGIN_REGEX
+        value: ""
+      - key: QUERY_COST
+        value: "1"
+      - key: DATASET_OWNER_REWARD
+        value: "1"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false

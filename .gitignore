@@ -9,7 +9,11 @@ ENV/
 .env
 .venv
 *.db
+*.db-wal
+*.db-shm
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 *.duckdb
 *.duckdb.wal
 storage/

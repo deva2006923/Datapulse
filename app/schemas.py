@@ -8,6 +8,9 @@ class HealthResponse(BaseModel):
     cors_regex: bool = Field(description="Whether CORS_ORIGIN_REGEX is enabled")
     embeddings: bool = Field(description="Whether EMBEDDINGS_ENABLED is true")
     version: str = Field(default="1.0.0", description="API Version")
+    database_ok: bool = Field(default=True, description="Whether SQLite metadata database is accessible")
+    storage_ok: bool = Field(default=True, description="Whether DuckDB analytical storage is accessible")
+    environment: str = Field(default="development", description="Active runtime environment")
 
 
 # Auth Schemas

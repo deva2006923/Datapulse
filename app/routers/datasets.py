@@ -5,6 +5,7 @@ import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import UploadFile, File, Form, Depends, HTTPException, status, Query
 from app.routers import TrailingSlashRouter
+from app.config import settings
 from app.database import get_db_connection
 from app.auth import get_current_user, get_optional_user
 from app.schemas import (
@@ -38,13 +39,18 @@ async def upload_dataset(
     name: Optional[str] = Form(None),
     user: dict = Depends(get_current_user)
 ):
-    if not file.filename.lower().endswith(".csv"):
+    if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only CSV files (.csv) are currently supported"
         )
-        
-    content_bytes = await file.read()
+
+    content_bytes = await file.read(settings.max_upload_bytes + 1)
+    if len(content_bytes) > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"CSV file exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB} MB."
+        )
     csv_content = content_bytes.decode("utf-8", errors="replace")
     
     filename = file.filename

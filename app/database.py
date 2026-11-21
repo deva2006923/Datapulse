@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import json
 import threading
@@ -6,18 +7,31 @@ from app.config import settings
 
 _local = threading.local()
 
+
+def _open_sqlite_connection() -> sqlite3.Connection:
+    db_path = settings.DATABASE_PATH
+    if db_path and db_path != ":memory:":
+        db_dir = os.path.dirname(os.path.abspath(db_path))
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=15000;")
+    except sqlite3.DatabaseError:
+        pass
+    return conn
+
+
 def get_db_connection() -> sqlite3.Connection:
     if not hasattr(_local, "conn") or _local.conn is None:
-        conn = sqlite3.connect(settings.DATABASE_PATH, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        _local.conn = conn
+        _local.conn = _open_sqlite_connection()
     else:
         try:
             _local.conn.cursor()
         except sqlite3.ProgrammingError:
-            conn = sqlite3.connect(settings.DATABASE_PATH, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            _local.conn = conn
+            _local.conn = _open_sqlite_connection()
     return _local.conn
 
 def init_db():
