@@ -173,8 +173,16 @@ def validate_sql(
     if not referenced_tables:
         raise SQLSecurityError(f"Query must reference table '{allowed_table}'")
 
+    # Allow CTE aliases explicitly defined in a WITH clause while still requiring allowed_table
+    cte_names = {
+        m.group(1).strip("\"'`").lower()
+        for m in re.finditer(r"(?:\bWITH\b|,)\s*([a-zA-Z0-9_]+)\s+AS\s*\(", cleaned, re.IGNORECASE)
+    }
+    if allowed_table.lower() not in referenced_tables:
+        raise SQLSecurityError(f"Query must reference table '{allowed_table}'")
+
     for tbl in referenced_tables:
-        if tbl != allowed_table.lower():
+        if tbl != allowed_table.lower() and tbl not in cte_names:
             raise SQLSecurityError(f"Query references unauthorized table '{tbl}'. Only '{allowed_table}' is permitted.")
 
     # 7. Semantic & Binder Validation using DuckDB EXPLAIN
@@ -201,12 +209,14 @@ def fallback_rule_sql_generator(
     table_name: str,
     columns_with_types: List[Tuple[str, str]]
 ) -> Optional[str]:
-    """Lightweight fallback generator for basic questions when no AI API key is configured."""
+    """Lightweight schema-driven fallback generator for basic questions when no AI API key is configured."""
     q = question.lower().strip()
-    if any(w in q for w in ("how many", "count", "number of rows", "total rows")):
+    if any(w in q for w in ("how many", "count", "number of rows", "total rows", "total records")):
         return f"SELECT COUNT(*) AS total_count FROM {table_name}"
-    if any(w in q for w in ("what items", "show items", "list items", "catalog", "items in")):
-        return f"SELECT * FROM {table_name} LIMIT 10"
+    if any(w in q for w in ("what items", "show items", "list items", "catalog", "items in", "sample", "first", "preview", "show rows", "top rows", "show top")):
+        limit_match = re.search(r"\b(?:top|first|limit)\s+(\d+)\b", q)
+        lim = min(100, max(1, int(limit_match.group(1)))) if limit_match else 10
+        return f"SELECT * FROM {table_name} LIMIT {lim}"
     return None
 
 

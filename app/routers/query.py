@@ -23,6 +23,7 @@ from app.services.marketplace import (
 from app.services.storage import (
     get_dataset_table_name,
     dataset_table_exists,
+    get_existing_dataset_ids,
     get_dataset_columns,
     get_dataset_row_count
 )
@@ -133,8 +134,11 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
         relevance_score = 1.0
         datasets = [target_dataset]
     else:
-        cursor.execute("SELECT * FROM datasets ORDER BY created_at DESC LIMIT 10")
-        datasets = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("SELECT * FROM datasets ORDER BY created_at DESC")
+        all_datasets = [dict(r) for r in cursor.fetchall()]
+        existing_tables = get_existing_dataset_ids()
+        available_datasets = [d for d in all_datasets if d["id"] in existing_tables]
+        datasets = available_datasets if available_datasets else all_datasets
         if not datasets:
             exec_ms = int((time.perf_counter() - start_time) * 1000)
             _log_query_record(
@@ -513,7 +517,9 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
         sql_query=validated_sql,
         columns=columns,
         results=results,
-        credits_charged=query_cost
+        credits_charged=query_cost,
+        dataset_id=dataset_id,
+        dataset_name=target_dataset["name"]
     )
 
 

@@ -53,6 +53,8 @@ class DatasetDetailResponse(BaseModel):
     content_summary: str
     unlock_price: int = Field(default=10, description="Dataset-specific one-time marketplace unlock price")
     unlocked_by: List[str] = Field(default_factory=list, description="User IDs that have unlocked this dataset")
+    storage_available: bool = Field(default=True, description="Whether analytical table is available in DuckDB")
+    availability: str = Field(default="Available", description="Human-readable storage availability status")
     created_at: str
     quality_score: Optional[float] = None
     domain_relevance_score: Optional[float] = None
@@ -116,6 +118,8 @@ class QueryResponse(BaseModel):
     columns: Optional[List[str]] = Field(default=None, description="Column names returned by the query")
     results: Optional[List[Dict[str, Any]]] = Field(default=None, description="Actual data rows returned from DuckDB")
     credits_charged: Optional[int] = Field(default=None, description="Credits charged for this query")
+    dataset_id: Optional[str] = Field(default=None, description="Target dataset ID executed against")
+    dataset_name: Optional[str] = Field(default=None, description="Target dataset name executed against")
 
 
 class QueryHistoryItem(BaseModel):

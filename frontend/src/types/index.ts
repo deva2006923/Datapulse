@@ -56,6 +56,8 @@ export interface BackendDatasetDetail {
   content_summary: string;
   unlock_price?: number;
   unlocked_by?: string[];
+  storage_available?: boolean;
+  availability?: string;
   created_at: string;
   quality_score?: number;
   domain_relevance_score?: number;
@@ -135,6 +137,8 @@ export interface QueryResponse {
   columns?: string[] | null;
   results?: Record<string, any>[] | null;
   credits_charged?: number | null;
+  dataset_id?: string | null;
+  dataset_name?: string | null;
 }
 
 export interface TransactionItem {
@@ -252,6 +256,8 @@ export interface AppDataset {
   currentVersion: string;
   versionHistory: DatasetVersionEntry[];
   unlockedBy: string[]; // List of userIds who unlocked this dataset
+  storageAvailable?: boolean;
+  availability?: string;
   sampleQueries: string[];
   matchScore?: number;
 }

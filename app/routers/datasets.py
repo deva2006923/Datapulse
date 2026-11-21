@@ -15,7 +15,12 @@ from app.schemas import (
 )
 from app.services.evaluation import parse_and_evaluate_csv, run_evaluation_pipeline
 from app.services.recommender import recommend_datasets
-from app.services.storage import persist_dataset, delete_dataset_storage
+from app.services.storage import (
+    persist_dataset,
+    delete_dataset_storage,
+    get_existing_dataset_ids,
+    dataset_table_exists,
+)
 from app.services.reputation import sync_and_get_user_reputation
 
 router = TrailingSlashRouter(tags=["Datasets"])
@@ -168,6 +173,7 @@ def list_datasets(domain: Optional[str] = Query(None)):
     rows = cursor.fetchall()
     
     unlocks_map = _get_dataset_unlocks_map(conn)
+    existing_tables = get_existing_dataset_ids()
     
     # Fetch evaluations map
     cursor.execute("SELECT dataset_id, quality_score, domain_relevance_score, overall_score, credits_awarded FROM evaluations")
@@ -180,6 +186,7 @@ def list_datasets(domain: Optional[str] = Query(None)):
         unlocked_list = list(set([author_id] + unlocks_map.get(ds_id, [])))
         price = r["unlock_price"] if "unlock_price" in r.keys() and r["unlock_price"] is not None else 10
         eval_info = eval_map.get(ds_id)
+        is_avail = ds_id in existing_tables
 
         items.append(DatasetDetailResponse(
             id=ds_id,
@@ -193,6 +200,8 @@ def list_datasets(domain: Optional[str] = Query(None)):
             content_summary=r["content_summary"],
             unlock_price=price,
             unlocked_by=unlocked_list,
+            storage_available=is_avail,
+            availability="Available" if is_avail else "Unavailable",
             quality_score=float(eval_info["quality_score"]) if eval_info else None,
             domain_relevance_score=float(eval_info["domain_relevance_score"]) if eval_info else None,
             overall_score=float(eval_info["overall_score"]) if eval_info else None,
@@ -219,6 +228,10 @@ def get_dataset(dataset_id: str):
 
     cursor.execute("SELECT quality_score, domain_relevance_score, overall_score, credits_awarded FROM evaluations WHERE dataset_id = ?", (dataset_id,))
     eval_info = cursor.fetchone()
+    try:
+        is_avail = dataset_table_exists(dataset_id)
+    except ValueError:
+        is_avail = False
 
     return DatasetDetailResponse(
         id=r["id"],
@@ -232,6 +245,8 @@ def get_dataset(dataset_id: str):
         content_summary=r["content_summary"],
         unlock_price=price,
         unlocked_by=unlocked_users,
+        storage_available=is_avail,
+        availability="Available" if is_avail else "Unavailable",
         quality_score=float(eval_info["quality_score"]) if eval_info else None,
         domain_relevance_score=float(eval_info["domain_relevance_score"]) if eval_info else None,
         overall_score=float(eval_info["overall_score"]) if eval_info else None,
@@ -479,4 +494,3 @@ def search_datasets(req: SearchRequest):
 def search_datasets_get(q: str = Query(..., min_length=1), domain: Optional[str] = Query(None), limit: int = Query(10, ge=1, le=100)):
     req = SearchRequest(query=q, domain=domain, limit=limit)
     return search_datasets(req)
-

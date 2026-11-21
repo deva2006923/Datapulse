@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
 import { ToastContainer } from './components/ToastContainer';
 import { LandingView } from './views/LandingView';
@@ -37,14 +37,6 @@ import {
   transactionItemToWalletTransaction,
 } from './services/datasetAdapter';
 
-import {
-  INITIAL_DATASETS,
-  INITIAL_TRANSACTIONS,
-  MOCK_DATA_VERSION,
-} from './data/mockData';
-
-const MOCK_STORAGE_KEY = `datapulse_state_${MOCK_DATA_VERSION}`;
-
 const PROTECTED_ROUTES: PageRoute[] = [
   'dashboard',
   'marketplace',
@@ -67,49 +59,60 @@ export default function App() {
   // Active authenticated user account from backend
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
 
-  const [datasets, setDatasets] = useState<AppDataset[]>(() => {
-    try {
-      const storedVer = localStorage.getItem('datapulse_version_key');
-      if (storedVer === MOCK_DATA_VERSION) {
-        const saved = localStorage.getItem(`${MOCK_STORAGE_KEY}_datasets`);
-        if (saved) return JSON.parse(saved);
-      }
-    } catch (e) {
-      // fallback
-    }
-    return INITIAL_DATASETS;
-  });
-
-  const [transactions, setTransactions] = useState<WalletTransaction[]>(() => {
-    try {
-      const storedVer = localStorage.getItem('datapulse_version_key');
-      if (storedVer === MOCK_DATA_VERSION) {
-        const saved = localStorage.getItem(`${MOCK_STORAGE_KEY}_transactions`);
-        if (saved) return JSON.parse(saved);
-      }
-    } catch (e) {
-      // fallback
-    }
-    return INITIAL_TRANSACTIONS;
-  });
+  // Authoritative backend catalog & ledger state (never seeded with hardcoded demo dataset IDs)
+  const [datasets, setDatasets] = useState<AppDataset[]>([]);
+  const [isDatasetsLoading, setIsDatasetsLoading] = useState<boolean>(false);
+  const [transactions, setTransactions] = useState<WalletTransaction[]>([]);
 
   // Isolated query history for current authenticated user
   const [queryHistory, setQueryHistory] = useState<QueryHistoryItem[]>([]);
 
-  const [selectedDatasetId, setSelectedDatasetId] = useState<string>('ds-heart');
+  const [selectedDatasetId, setSelectedDatasetId] = useState<string>('');
   const [workspaceInitialPrompt, setWorkspaceInitialPrompt] = useState<string>('');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
-  // Persist local UI caches & set version key (no mock users stored)
+  // Clear legacy mock dataset caches from older builds so fake IDs never persist in browser storage
   useEffect(() => {
     try {
-      localStorage.setItem('datapulse_version_key', MOCK_DATA_VERSION);
-      localStorage.setItem(`${MOCK_STORAGE_KEY}_datasets`, JSON.stringify(datasets));
-      localStorage.setItem(`${MOCK_STORAGE_KEY}_transactions`, JSON.stringify(transactions));
-    } catch (e) {
-      // ignore
+      const keysToClear: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && (k === 'datapulse_version_key' || k.startsWith('datapulse_state_'))) {
+          keysToClear.push(k);
+        }
+      }
+      keysToClear.forEach((k) => localStorage.removeItem(k));
+    } catch {
+      // ignore storage access errors
     }
-  }, [datasets, transactions]);
+  }, []);
+
+  // Authoritative backend dataset catalog loader
+  const refreshDatasets = useCallback(
+    async (userIdOverride?: string): Promise<AppDataset[]> => {
+      const uid = userIdOverride ?? currentUser?.id;
+      setIsDatasetsLoading(true);
+      try {
+        const dsList = await api.datasets.list();
+        const rawList = dsList?.datasets || [];
+        const mapped = rawList.map((d) => backendDatasetToAppDataset(d, uid));
+        setDatasets(mapped);
+        setSelectedDatasetId((prev) => {
+          if (prev && mapped.some((d) => d.id === prev)) {
+            return prev;
+          }
+          const firstAvailable = mapped.find((d) => d.storageAvailable !== false) || mapped[0];
+          return firstAvailable ? firstAvailable.id : '';
+        });
+        return mapped;
+      } catch {
+        return [];
+      } finally {
+        setIsDatasetsLoading(false);
+      }
+    },
+    [currentUser?.id]
+  );
 
   // Safe fallback for views requiring a UserAccount while rendering unauthenticated landing
   const effectiveUser: UserAccount = currentUser || {
@@ -185,19 +188,8 @@ export default function App() {
         setIsAuthenticated(true);
         setCurrentRoute((curr) => (curr === 'login' ? 'dashboard' : curr));
 
-        // Fetch real datasets from backend catalog
-        try {
-          const dsList = await api.datasets.list();
-          if (dsList?.datasets && dsList.datasets.length > 0 && isMounted) {
-            const mappedDs = dsList.datasets.map((d) =>
-              backendDatasetToAppDataset(d, me.id)
-            );
-            setDatasets(mappedDs);
-            setSelectedDatasetId((prev) =>
-              mappedDs.some((d) => d.id === prev) ? prev : mappedDs[0].id
-            );
-          }
-        } catch {}
+        // Fetch real datasets from backend catalog (replaces state even if empty)
+        await refreshDatasets(me.id);
 
         // Fetch real credit ledger transactions from backend
         try {
@@ -284,20 +276,7 @@ export default function App() {
     );
 
     // Refresh datasets & transactions for logged in user
-    api.datasets
-      .list()
-      .then((dsList) => {
-        if (dsList?.datasets && dsList.datasets.length > 0) {
-          const mapped = dsList.datasets.map((d) =>
-            backendDatasetToAppDataset(d, user.id)
-          );
-          setDatasets(mapped);
-          setSelectedDatasetId((prev) =>
-            mapped.some((d) => d.id === prev) ? prev : mapped[0].id
-          );
-        }
-      })
-      .catch(() => {});
+    refreshDatasets(user.id);
 
     api.credits
       .getTransactions()
@@ -319,14 +298,28 @@ export default function App() {
       .catch(() => {});
   };
 
+  // Refresh dataset catalog automatically whenever entering dataset-dependent views
+  useEffect(() => {
+    if (
+      isAuthenticated &&
+      (currentRoute === 'query' ||
+        currentRoute === 'marketplace' ||
+        currentRoute === 'my-datasets' ||
+        currentRoute === 'versions-improve' ||
+        currentRoute === 'dashboard')
+    ) {
+      refreshDatasets();
+    }
+  }, [currentRoute, isAuthenticated, refreshDatasets]);
+
   const handleLogout = () => {
     api.auth.logout();
     setCurrentUser(null);
     setIsAuthenticated(false);
+    setDatasets([]);
+    setSelectedDatasetId('');
+    setTransactions([]);
     setQueryHistory([]);
-    try {
-      localStorage.removeItem(`${MOCK_STORAGE_KEY}_history`);
-    } catch {}
     setCurrentRoute('login');
     addToast('SESSION_ENDED', 'You have been successfully signed out.', 'emerald');
   };
@@ -396,17 +389,7 @@ export default function App() {
         })
         .catch(() => {});
 
-      api.datasets
-        .list()
-        .then((dsList) => {
-          if (dsList?.datasets && dsList.datasets.length > 0) {
-            const mapped = dsList.datasets.map((d) =>
-              backendDatasetToAppDataset(d, effectiveUser.id)
-            );
-            setDatasets(mapped);
-          }
-        })
-        .catch(() => {});
+      refreshDatasets(effectiveUser.id);
 
       api.credits
         .getTransactions()
@@ -535,6 +518,10 @@ export default function App() {
         errorType = 'INVALID_QUERY';
       } else if (error.status === 404) {
         errorType = 'DATASET_NOT_FOUND';
+        errorMessage =
+          error.message ||
+          'The selected dataset is no longer available on the server. The catalog has been refreshed.';
+        refreshDatasets(effectiveUser.id);
       } else if (error.status === 503) {
         errorType = 'AI_PROVIDER_ERROR';
       } else if (error.status === 401) {
@@ -605,7 +592,8 @@ export default function App() {
         )
       );
 
-      // Refresh transactions ledger
+      // Refresh authoritative datasets & transactions ledger from backend
+      refreshDatasets(effectiveUser.id);
       api.credits
         .getTransactions()
         .then((txList) => {
@@ -680,18 +668,7 @@ export default function App() {
         })
         .catch(() => {});
 
-      api.datasets
-        .list()
-        .then((dsList) => {
-          if (dsList?.datasets) {
-            setDatasets(
-              dsList.datasets.map((d) =>
-                backendDatasetToAppDataset(d, effectiveUser.id)
-              )
-            );
-          }
-        })
-        .catch(() => {});
+      refreshDatasets(effectiveUser.id);
 
       if (res.improvement_credits_awarded > 0) {
         addToast(
@@ -782,7 +759,7 @@ export default function App() {
   };
 
   const activeDataset =
-    datasets.find((d) => d.id === selectedDatasetId) || datasets[0] || INITIAL_DATASETS[0];
+    datasets.find((d) => d.id === selectedDatasetId) || datasets[0] || null;
 
   if (isAuthRestoring && api.auth.getToken()) {
     return (
@@ -855,14 +832,39 @@ export default function App() {
         )}
 
         {currentRoute === 'dataset-detail' && (
-          <DatasetDetailView
-            dataset={activeDataset}
-            currentUser={effectiveUser}
-            onNavigate={handleNavigate}
-            onOpenQueryWithPrompt={handleOpenQueryWorkspace}
-            onImproveDataset={handleOpenImprove}
-            onUnlockDataset={handleUnlockDataset}
-          />
+          activeDataset ? (
+            <DatasetDetailView
+              dataset={activeDataset}
+              currentUser={effectiveUser}
+              onNavigate={handleNavigate}
+              onOpenQueryWithPrompt={handleOpenQueryWorkspace}
+              onImproveDataset={handleOpenImprove}
+              onUnlockDataset={handleUnlockDataset}
+            />
+          ) : (
+            <div className="bg-white border border-slate-200 rounded-xl p-10 text-center space-y-3 max-w-xl mx-auto">
+              <p className="text-sm font-semibold text-slate-800">No dataset selected.</p>
+              <p className="text-xs text-slate-500">
+                Choose a dataset from the Marketplace or upload a new CSV dataset to inspect its schema.
+              </p>
+              <div className="flex items-center justify-center gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => handleNavigate('marketplace')}
+                  className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 cursor-pointer"
+                >
+                  Open Marketplace
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleNavigate('upload')}
+                  className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 cursor-pointer"
+                >
+                  Upload Dataset
+                </button>
+              </div>
+            </div>
+          )
         )}
 
         {currentRoute === 'upload' && (
@@ -880,6 +882,9 @@ export default function App() {
             selectedDatasetId={selectedDatasetId}
             onSelectDataset={setSelectedDatasetId}
             initialPrompt={workspaceInitialPrompt}
+            isDatasetsLoading={isDatasetsLoading}
+            onRefreshDatasets={() => refreshDatasets()}
+            onNavigate={handleNavigate}
             onExecuteQuery={handleExecuteQuery}
             sessionHistory={queryHistory.filter((q) => q.userId === effectiveUser.id)}
           />

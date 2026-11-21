@@ -56,11 +56,25 @@ export function backendDatasetToAppDataset(
   const unlockedList = Array.from(
     new Set([...(backend.unlocked_by || []), ...(isOwner ? [backend.user_id] : [])])
   );
+  const storageAvailable = backend.storage_available ?? true;
+  const availability = backend.availability || (storageAvailable ? 'Available' : 'Unavailable');
+
+  const displayTitle = backend.name || backend.filename || 'Structured Dataset';
+  const numericCol = columns.find((c) =>
+    ['integer', 'int', 'float', 'double', 'decimal', 'numeric', 'bigint'].some((t) =>
+      c.type.toLowerCase().includes(t)
+    )
+  );
+  const dynamicSampleQueries = [
+    `How many rows are in ${displayTitle}?`,
+    `Show the first 10 rows of ${displayTitle}`,
+    ...(numericCol ? [`What is the average ${numericCol.name} in ${displayTitle}?`] : []),
+  ];
 
   return {
     id: backend.id,
     name: backend.filename || `${backend.id}.csv`,
-    title: backend.name || backend.filename || 'Structured Dataset',
+    title: displayTitle,
     description:
       backend.content_summary ||
       `Dataset in the ${backend.domain || 'general'} domain with ${backend.rows_count} rows across ${backend.columns_count} columns.`,
@@ -102,10 +116,9 @@ export function backendDatasetToAppDataset(
       },
     ],
     unlockedBy: unlockedList,
-    sampleQueries: [
-      `How many rows are in this dataset?`,
-      `Show sample records from ${backend.name || 'this dataset'}`,
-    ],
+    storageAvailable,
+    availability,
+    sampleQueries: dynamicSampleQueries,
   };
 }
 
@@ -231,4 +244,3 @@ export function backendQueryHistoryItemToQueryHistoryItem(item: any): QueryHisto
     executionTimeMs: item.execution_time_ms ?? item.executionTimeMs ?? 0,
   };
 }
-
