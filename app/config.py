@@ -32,6 +32,8 @@ class Settings(BaseSettings):
 
     # Administrator Authorization
     ADMIN_EMAIL: str = "datapulseapplication@gmail.com"
+    # Temporary one-time activation token (disabled whenever unset or <32 chars)
+    ADMIN_BOOTSTRAP_TOKEN: Optional[str] = None
 
     SECRET_KEY: str = "datapulse-production-secret-key-replace-in-env"
     DATABASE_PATH: str = "datapulse.db"

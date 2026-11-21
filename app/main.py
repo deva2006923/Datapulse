@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.database import init_db
 from app.services.storage import init_storage
-from app.routers import health, auth, datasets, query, credits, user, admin
+from app.routers import health, auth, datasets, query, credits, user, admin, admin_bootstrap
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +89,7 @@ app.include_router(query.router)
 app.include_router(credits.router)
 app.include_router(user.router)
 app.include_router(admin.router)
+app.include_router(admin_bootstrap.router)
 
 if __name__ == "__main__":
     import uvicorn
