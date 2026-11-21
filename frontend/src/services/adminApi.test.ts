@@ -87,6 +87,24 @@ describe('Admin API Authorization & Endpoints (Integration)', () => {
       expect(err).toBeInstanceOf(ApiError);
       expect(err.status).toBe(403);
     }
+
+    // 7. Analytics -> 403
+    try {
+      await api.admin.getAnalytics({ range: '30d', granularity: 'daily' });
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(403);
+    }
+
+    // 8. Dataset Detail -> 403
+    try {
+      await api.admin.getDatasetDetail('ds_nonexistent');
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(403);
+    }
   });
 
   it('normal user querying history remains isolated', async () => {

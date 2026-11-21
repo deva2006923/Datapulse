@@ -1,33 +1,367 @@
 import json
-from typing import Optional, List, Any, Dict
+import re
+import datetime
+from typing import Optional, List, Any, Dict, Tuple, Set
 from fastapi import HTTPException, status, Depends, Query, Request
 from app.routers import TrailingSlashRouter
 from app.database import get_db_connection
 from app.auth import get_current_admin_user, log_admin_audit
+from app.services.storage import get_existing_dataset_ids
 from app.schemas import (
     AdminOverviewResponse,
     AdminActivityItem,
+    AdminAnalyticsResponse,
+    AdminAnalyticsKpis,
+    AdminTrendPoint,
+    AdminQueryTrendPoint,
+    AdminCreditTrendPoint,
+    AdminActiveUserRank,
+    AdminContributorRank,
+    AdminQueriedDatasetRank,
     AdminUserItem,
     AdminUserListResponse,
     AdminUserDetailResponse,
     AdminUserDatasetItem,
     AdminDatasetItem,
     AdminDatasetListResponse,
+    AdminDatasetDetailResponse,
     AdminQueryItem,
     AdminQueryListResponse,
     AdminTransactionItem,
     AdminTransactionListResponse,
     AdminAuditLogItem,
-    AdminAuditLogListResponse
+    AdminAuditLogListResponse,
+    AdminTimelineItem,
+    AdminTimelineResponse,
 )
 
 router = TrailingSlashRouter(prefix="/admin", tags=["Admin Dashboard"])
+
+OWNER_EARNING_TYPES = (
+    "upload_reward",
+    "quality_reward",
+    "reward",
+    "improvement_reward",
+    "query_reward",
+    "unlock_royalty",
+)
+
+DATASET_ID_RE = re.compile(r"\b(ds_[a-zA-Z0-9_-]+)\b")
+QUERY_ID_RE = re.compile(r"\b(qry_[a-zA-Z0-9_-]+)\b")
+
+
+def _norm_date_sql(col: str) -> str:
+    """Normalizes both 'YYYY-MM-DD HH:MM:SS' and 'YYYY-MM-DDTHH:MM:SS' to YYYY-MM-DD for consistent UTC date comparisons."""
+    return f"SUBSTR(REPLACE(COALESCE({col}, ''), ' ', 'T'), 1, 10)"
+
+
+def _norm_ts_sql(col: str) -> str:
+    """Normalizes SQLite CURRENT_TIMESTAMP space-separated timestamps to ISO 'T' form for deterministic chronological sorting."""
+    return f"REPLACE(COALESCE({col}, ''), ' ', 'T')"
+
+
+def _bucket_sql(col: str, granularity: str) -> str:
+    date_expr = _norm_date_sql(col)
+    if granularity == "monthly":
+        return f"SUBSTR({date_expr}, 1, 7)"
+    if granularity == "weekly":
+        return f"strftime('%Y-W%W', {date_expr})"
+    return date_expr
+
+
+def _parse_iso_date(date_str: Optional[str]) -> Optional[datetime.date]:
+    if not date_str or not date_str.strip():
+        return None
+    s = date_str.strip()[:10]
+    try:
+        return datetime.date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _resolve_date_window(
+    range_key: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """
+    Returns (normalized_range, cur_start, cur_end, prev_start, prev_end, comparison_label)
+    using UTC dates in YYYY-MM-DD format.
+    """
+    rk = (range_key or "all").strip().lower()
+    today = datetime.datetime.utcnow().date()
+
+    if rk in ("7d", "30d", "90d"):
+        days = int(rk[:-1])
+        cur_end = today
+        cur_start = today - datetime.timedelta(days=days - 1)
+        prev_end = cur_start - datetime.timedelta(days=1)
+        prev_start = prev_end - datetime.timedelta(days=days - 1)
+        return (
+            rk,
+            cur_start.isoformat(),
+            cur_end.isoformat(),
+            prev_start.isoformat(),
+            prev_end.isoformat(),
+            f"vs prior {days} days",
+        )
+
+    if rk == "custom" or start_date or end_date:
+        s_dt = _parse_iso_date(start_date)
+        e_dt = _parse_iso_date(end_date)
+        if s_dt and e_dt and s_dt > e_dt:
+            s_dt, e_dt = e_dt, s_dt
+        if s_dt and e_dt:
+            span = (e_dt - s_dt).days + 1
+            prev_end = s_dt - datetime.timedelta(days=1)
+            prev_start = prev_end - datetime.timedelta(days=span - 1)
+            return (
+                "custom",
+                s_dt.isoformat(),
+                e_dt.isoformat(),
+                prev_start.isoformat(),
+                prev_end.isoformat(),
+                f"vs prior {span}d period",
+            )
+        return (
+            "custom",
+            s_dt.isoformat() if s_dt else None,
+            e_dt.isoformat() if e_dt else None,
+            None,
+            None,
+            None,
+        )
+
+    # All-time window: no date restriction on main totals, compare last 30d vs prior 30d for growth indicator
+    cur_end_30 = today
+    cur_start_30 = today - datetime.timedelta(days=29)
+    prev_end_30 = cur_start_30 - datetime.timedelta(days=1)
+    prev_start_30 = prev_end_30 - datetime.timedelta(days=29)
+    return (
+        "all",
+        None,
+        None,
+        prev_start_30.isoformat(),
+        prev_end_30.isoformat(),
+        "30d momentum",
+    )
+
+
+def _append_date_conditions(
+    conditions: List[str],
+    params: List[Any],
+    col: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> None:
+    date_expr = _norm_date_sql(col)
+    if start_date and start_date.strip():
+        conditions.append(f"{date_expr} >= ?")
+        params.append(start_date.strip()[:10])
+    if end_date and end_date.strip():
+        conditions.append(f"{date_expr} <= ?")
+        params.append(end_date.strip()[:10])
+
+
+def _pct_delta(current: int, previous: int) -> Optional[float]:
+    if previous == 0:
+        if current == 0:
+            return 0.0
+        return 100.0
+    return round(((current - previous) / previous) * 100.0, 1)
+
+
+def _extract_resource_ids(description: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extracts (associated_resource_label, dataset_id, query_id) from transaction description."""
+    desc = description or ""
+    ds_match = DATASET_ID_RE.search(desc)
+    q_match = QUERY_ID_RE.search(desc)
+    ds_id = ds_match.group(1) if ds_match else None
+    q_id = q_match.group(1) if q_match else None
+
+    low = desc.lower()
+    if ds_id or "dataset" in low:
+        assoc = "Dataset Asset"
+    elif q_id or "query" in low:
+        assoc = "Query Engine"
+    elif "redeem" in low:
+        assoc = "Payout Redemption"
+    elif "welcome" in low or "bonus" in low:
+        assoc = "Account Onboarding"
+    elif "refund" in low:
+        assoc = "Credit Refund"
+    else:
+        assoc = "Account Ledger"
+    return assoc, ds_id, q_id
+
+
+def _batch_dataset_names(cursor, dataset_ids: Set[str]) -> Dict[str, str]:
+    if not dataset_ids:
+        return {}
+    placeholders = ",".join("?" for _ in dataset_ids)
+    cursor.execute(f"SELECT id, name FROM datasets WHERE id IN ({placeholders})", list(dataset_ids))
+    return {r["id"]: r["name"] for r in cursor.fetchall()}
+
+
+def _batch_dataset_rewards_and_versions(
+    cursor,
+    dataset_ids: List[str],
+) -> Tuple[Dict[str, Dict[str, int]], Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
+    """
+    Single-pass batch loader (no N+1) for:
+      - Per-dataset reward breakdown (basic_upload_reward, quality_reward, improvement_rewards)
+      - Per-dataset version history list
+      - Per-dataset query usage count
+    """
+    rewards_map: Dict[str, Dict[str, int]] = {
+        ds_id: {"basic": 0, "quality": 0, "improvement": 0} for ds_id in dataset_ids
+    }
+    versions_map: Dict[str, List[Dict[str, Any]]] = {ds_id: [] for ds_id in dataset_ids}
+    query_counts_map: Dict[str, int] = {ds_id: 0 for ds_id in dataset_ids}
+
+    if not dataset_ids:
+        return rewards_map, versions_map, query_counts_map
+
+    placeholders = ",".join("?" for _ in dataset_ids)
+
+    # 1. Versions in a single query
+    cursor.execute(
+        f"""
+        SELECT dataset_id, version, quality_score, relevance_score, overall_score,
+               delta_score, credits_awarded, changes_summary, created_at
+        FROM dataset_versions
+        WHERE dataset_id IN ({placeholders})
+        ORDER BY {_norm_ts_sql('created_at')} DESC, id DESC
+        """,
+        dataset_ids,
+    )
+    for v in cursor.fetchall():
+        ds_id = v["dataset_id"]
+        v_dict = dict(v)
+        versions_map.setdefault(ds_id, []).append(v_dict)
+        if ds_id in rewards_map:
+            rewards_map[ds_id]["improvement"] += int(v["credits_awarded"] or 0)
+
+    # 2. Query counts in a single grouped query
+    cursor.execute(
+        f"""
+        SELECT dataset_id, COUNT(*) AS cnt
+        FROM queries
+        WHERE dataset_id IN ({placeholders})
+        GROUP BY dataset_id
+        """,
+        dataset_ids,
+    )
+    for q in cursor.fetchall():
+        query_counts_map[q["dataset_id"]] = int(q["cnt"] or 0)
+
+    # 3. Credit transaction rewards (upload_reward, quality_reward, legacy reward) for these datasets
+    cursor.execute(
+        f"""
+        SELECT DISTINCT d.user_id FROM datasets d WHERE d.id IN ({placeholders})
+        """,
+        dataset_ids,
+    )
+    owner_ids = [r["user_id"] for r in cursor.fetchall()]
+    if owner_ids:
+        owner_ph = ",".join("?" for _ in owner_ids)
+        cursor.execute(
+            f"""
+            SELECT transaction_type, amount, description
+            FROM credit_transactions
+            WHERE user_id IN ({owner_ph})
+              AND LOWER(transaction_type) IN ('upload_reward', 'quality_reward', 'reward')
+              AND amount > 0
+            """,
+            owner_ids,
+        )
+        ds_set = set(dataset_ids)
+        for tx in cursor.fetchall():
+            desc = tx["description"] or ""
+            m = DATASET_ID_RE.search(desc)
+            if not m:
+                continue
+            ds_id = m.group(1)
+            if ds_id not in ds_set:
+                continue
+            tt = (tx["transaction_type"] or "").lower()
+            amt = int(tx["amount"] or 0)
+            if tt == "upload_reward":
+                rewards_map[ds_id]["basic"] += amt
+            elif tt == "quality_reward":
+                rewards_map[ds_id]["quality"] += amt
+            elif tt == "reward":
+                # Legacy combined upload+quality reward (50 base + remainder quality)
+                base_part = min(50, amt)
+                rewards_map[ds_id]["basic"] += base_part
+                rewards_map[ds_id]["quality"] += max(0, amt - base_part)
+
+    # Fallback from evaluations table if legacy datasets had credits_awarded without ds_id in tx description
+    cursor.execute(
+        f"""
+        SELECT dataset_id, credits_awarded
+        FROM evaluations
+        WHERE dataset_id IN ({placeholders}) AND credits_awarded > 0
+        """,
+        dataset_ids,
+    )
+    for ev in cursor.fetchall():
+        ds_id = ev["dataset_id"]
+        if ds_id in rewards_map and rewards_map[ds_id]["basic"] == 0 and rewards_map[ds_id]["quality"] == 0:
+            total_ev = int(ev["credits_awarded"] or 0)
+            base_part = min(50, total_ev)
+            rewards_map[ds_id]["basic"] = base_part
+            rewards_map[ds_id]["quality"] = max(0, total_ev - base_part)
+
+    return rewards_map, versions_map, query_counts_map
+
+
+def _count_active_users(
+    cursor,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> int:
+    """Counts distinct users with at least one query, dataset upload, improvement, or unlock in the window."""
+    q_conds, q_params = [], []
+    d_conds, d_params = [], []
+    v_conds, v_params = [], []
+    u_conds, u_params = [], []
+
+    _append_date_conditions(q_conds, q_params, "created_at", start_date, end_date)
+    _append_date_conditions(d_conds, d_params, "created_at", start_date, end_date)
+    _append_date_conditions(v_conds, v_params, "created_at", start_date, end_date)
+    _append_date_conditions(u_conds, u_params, "created_at", start_date, end_date)
+
+    q_w = f"WHERE {' AND '.join(q_conds)}" if q_conds else ""
+    d_w = f"WHERE {' AND '.join(d_conds)}" if d_conds else ""
+    v_w = f"WHERE {' AND '.join(v_conds)}" if v_conds else ""
+    u_w = f"WHERE {' AND '.join(u_conds)}" if u_conds else ""
+
+    sql = f"""
+        SELECT COUNT(DISTINCT user_id) AS total
+        FROM (
+            SELECT user_id FROM queries {q_w}
+            UNION
+            SELECT user_id FROM datasets {d_w}
+            UNION
+            SELECT user_id FROM dataset_versions {v_w}
+            UNION
+            SELECT user_id FROM dataset_unlocks {u_w}
+        ) active_u
+        WHERE user_id IS NOT NULL
+    """
+    cursor.execute(sql, q_params + d_params + v_params + u_params)
+    row = cursor.fetchone()
+    return int(row["total"] or 0) if row else 0
 
 
 @router.get("/overview", response_model=AdminOverviewResponse)
 def get_admin_overview(
     request: Request,
-    admin: dict = Depends(get_current_admin_user)
+    range: Optional[str] = Query("all", description="Date range preset: 7d, 30d, 90d, all, custom"),
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
+    admin: dict = Depends(get_current_admin_user),
 ):
     """
     Returns platform-wide summary metrics and recent platform activities.
@@ -36,38 +370,70 @@ def get_admin_overview(
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 1. Total registered users
-    cursor.execute("SELECT COUNT(*) AS total FROM users")
-    total_users = cursor.fetchone()["total"] or 0
+    _, cur_start, cur_end, _, _, _ = _resolve_date_window(range, start_date, end_date)
 
-    # 2. Total uploaded datasets
-    cursor.execute("SELECT COUNT(*) AS total FROM datasets")
-    total_datasets = cursor.fetchone()["total"] or 0
+    # 1. Users
+    u_conds, u_params = [], []
+    _append_date_conditions(u_conds, u_params, "created_at", cur_start, cur_end)
+    u_where = f"WHERE {' AND '.join(u_conds)}" if u_conds else ""
+    cursor.execute(f"SELECT COUNT(*) AS total FROM users {u_where}", u_params)
+    total_users = int(cursor.fetchone()["total"] or 0)
 
-    # 3. Total queries, successful vs failed
-    cursor.execute("SELECT COUNT(*) AS total FROM queries")
-    total_queries = cursor.fetchone()["total"] or 0
+    active_users = _count_active_users(cursor, cur_start, cur_end)
 
-    cursor.execute("SELECT COUNT(*) AS total FROM queries WHERE UPPER(status) = 'SUCCESS'")
-    total_queries_successful = cursor.fetchone()["total"] or 0
+    # 2. Datasets
+    d_conds, d_params = [], []
+    _append_date_conditions(d_conds, d_params, "created_at", cur_start, cur_end)
+    d_where = f"WHERE {' AND '.join(d_conds)}" if d_conds else ""
+    cursor.execute(f"SELECT COUNT(*) AS total FROM datasets {d_where}", d_params)
+    total_datasets = int(cursor.fetchone()["total"] or 0)
+
+    # 3. Queries
+    q_conds, q_params = [], []
+    _append_date_conditions(q_conds, q_params, "created_at", cur_start, cur_end)
+    q_where = f"WHERE {' AND '.join(q_conds)}" if q_conds else ""
+    cursor.execute(
+        f"""
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN UPPER(COALESCE(status, 'SUCCESS')) = 'SUCCESS' THEN 1 ELSE 0 END) AS ok
+        FROM queries {q_where}
+        """,
+        q_params,
+    )
+    q_row = cursor.fetchone()
+    total_queries = int(q_row["total"] or 0)
+    total_queries_successful = int(q_row["ok"] or 0)
     total_queries_failed = total_queries - total_queries_successful
+    query_success_rate = round((total_queries_successful / total_queries) * 100.0, 1) if total_queries > 0 else 100.0
 
-    # 4. Total credits issued and spent
-    cursor.execute("SELECT SUM(amount) AS total FROM credit_transactions WHERE amount > 0")
-    total_credits_issued = cursor.fetchone()["total"] or 0
+    # 4. Credits
+    t_conds, t_params = [], []
+    _append_date_conditions(t_conds, t_params, "created_at", cur_start, cur_end)
+    t_where = f"WHERE {' AND '.join(t_conds)}" if t_conds else ""
+    cursor.execute(
+        f"""
+        SELECT
+            COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS issued,
+            COALESCE(ABS(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END)), 0) AS spent,
+            COALESCE(SUM(CASE WHEN LOWER(transaction_type) LIKE '%refund%' AND amount > 0 THEN amount ELSE 0 END), 0) AS refunded
+        FROM credit_transactions {t_where}
+        """,
+        t_params,
+    )
+    t_row = cursor.fetchone()
+    total_credits_issued = int(t_row["issued"] or 0)
+    total_credits_spent = int(t_row["spent"] or 0)
+    total_credits_refunded = int(t_row["refunded"] or 0)
+    net_credit_movement = total_credits_issued - total_credits_spent
 
-    cursor.execute("SELECT ABS(SUM(amount)) AS total FROM credit_transactions WHERE amount < 0")
-    total_credits_spent = cursor.fetchone()["total"] or 0
+    # Authoritative current liability (sum of user balances)
+    cursor.execute("SELECT COALESCE(SUM(credits), 0) AS total FROM users")
+    net_credit_liability = int(cursor.fetchone()["total"] or 0)
 
-    # Net credit liability (sum of current user balances)
-    cursor.execute("SELECT SUM(credits) AS total FROM users")
-    net_credit_liability = cursor.fetchone()["total"] or 0
-
-    # 5. Recent platform activity feed
+    # 5. Recent platform activity feed (normalized chronological ordering)
     activity_items: List[AdminActivityItem] = []
 
-    # Recent user registrations
-    cursor.execute("SELECT id, email, full_name, created_at FROM users ORDER BY created_at DESC LIMIT 5")
+    cursor.execute(f"SELECT id, email, full_name, created_at FROM users ORDER BY {_norm_ts_sql('created_at')} DESC LIMIT 6")
     for r in cursor.fetchall():
         activity_items.append(AdminActivityItem(
             id=f"act_reg_{r['id']}",
@@ -76,15 +442,14 @@ def get_admin_overview(
             user_id=r["id"],
             user_email=r["email"],
             status="SUCCESS",
-            timestamp=r["created_at"]
+            timestamp=r["created_at"],
         ))
 
-    # Recent dataset uploads
-    cursor.execute("""
+    cursor.execute(f"""
         SELECT d.id, d.name, d.rows_count, d.created_at, u.id AS user_id, u.email AS user_email
         FROM datasets d
         JOIN users u ON d.user_id = u.id
-        ORDER BY d.created_at DESC LIMIT 5
+        ORDER BY {_norm_ts_sql('d.created_at')} DESC LIMIT 6
     """)
     for r in cursor.fetchall():
         activity_items.append(AdminActivityItem(
@@ -93,73 +458,452 @@ def get_admin_overview(
             description=f"Dataset uploaded: '{r['name']}' ({r['rows_count']} rows)",
             user_id=r["user_id"],
             user_email=r["user_email"],
+            dataset_id=r["id"],
             status="SUCCESS",
-            timestamp=r["created_at"]
+            timestamp=r["created_at"],
         ))
 
-    # Recent query executions
-    cursor.execute("""
-        SELECT q.id, q.query_text, q.dataset_name, q.status, q.created_at, u.id AS user_id, u.email AS user_email
+    cursor.execute(f"""
+        SELECT q.id, q.query_text, q.dataset_id, q.dataset_name, q.status, q.created_at, u.id AS user_id, u.email AS user_email
         FROM queries q
         JOIN users u ON q.user_id = u.id
-        ORDER BY q.created_at DESC LIMIT 5
+        ORDER BY {_norm_ts_sql('q.created_at')} DESC LIMIT 6
     """)
     for r in cursor.fetchall():
         ds_name = r["dataset_name"] or "Cross-Catalog"
-        q_snippet = (r["query_text"][:50] + "...") if len(r["query_text"]) > 50 else r["query_text"]
+        q_snippet = (r["query_text"][:56] + "...") if len(r["query_text"]) > 56 else r["query_text"]
         activity_items.append(AdminActivityItem(
             id=f"act_qry_{r['id']}",
             type="QUERY_EXECUTION",
             description=f"Query on {ds_name}: \"{q_snippet}\"",
             user_id=r["user_id"],
             user_email=r["user_email"],
+            dataset_id=r["dataset_id"],
             status=r["status"] or "SUCCESS",
-            timestamp=r["created_at"]
+            timestamp=r["created_at"],
         ))
 
-    # Recent transactions
-    cursor.execute("""
+    cursor.execute(f"""
         SELECT t.id, t.amount, t.description, t.transaction_type, t.created_at, u.id AS user_id, u.email AS user_email
         FROM credit_transactions t
         JOIN users u ON t.user_id = u.id
-        ORDER BY t.created_at DESC LIMIT 5
+        ORDER BY {_norm_ts_sql('t.created_at')} DESC LIMIT 6
     """)
     for r in cursor.fetchall():
         impact = f"+{r['amount']}" if r["amount"] > 0 else f"{r['amount']}"
+        _, ds_id, _ = _extract_resource_ids(r["description"] or "")
         activity_items.append(AdminActivityItem(
             id=f"act_tx_{r['id']}",
             type="CREDIT_TRANSACTION",
             description=f"{r['description']} ({impact} cr)",
             user_id=r["user_id"],
             user_email=r["user_email"],
+            dataset_id=ds_id,
             status="SUCCESS",
-            timestamp=r["created_at"]
+            timestamp=r["created_at"],
         ))
 
-    # Sort consolidated activity feed newest first
-    activity_items.sort(key=lambda a: a.timestamp, reverse=True)
-    recent_activity = activity_items[:15]
+    activity_items.sort(key=lambda a: (a.timestamp or "").replace(" ", "T"), reverse=True)
+    recent_activity = activity_items[:12]
 
-    # Audit log entry
     client_ip = request.client.host if request.client else None
     log_admin_audit(
         admin_user_id=admin["id"],
         admin_email=admin["email"],
         action="VIEW_OVERVIEW",
-        details="Platform overview requested",
-        ip_address=client_ip
+        details=f"Platform overview requested (range={range})",
+        ip_address=client_ip,
     )
 
     return AdminOverviewResponse(
         total_users=total_users,
+        active_users=active_users,
         total_datasets=total_datasets,
         total_queries=total_queries,
         total_queries_successful=total_queries_successful,
         total_queries_failed=total_queries_failed,
+        query_success_rate=query_success_rate,
         total_credits_issued=total_credits_issued,
         total_credits_spent=total_credits_spent,
+        total_credits_refunded=total_credits_refunded,
+        net_credit_movement=net_credit_movement,
         net_credit_liability=net_credit_liability,
-        recent_activity=recent_activity
+        recent_activity=recent_activity,
+    )
+
+
+@router.get("/analytics", response_model=AdminAnalyticsResponse)
+def get_admin_analytics(
+    request: Request,
+    range: Optional[str] = Query("all", description="Date range preset: 7d, 30d, 90d, all, custom"),
+    start_date: Optional[str] = Query(None, description="Custom start date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="Custom end date YYYY-MM-DD"),
+    granularity: Optional[str] = Query("daily", description="Time bucket granularity: daily, weekly, monthly"),
+    admin: dict = Depends(get_current_admin_user),
+):
+    """
+    Comprehensive platform analytics powering KPI comparison deltas, time-series trends,
+    and user/dataset leaderboards. Backed exclusively by real database records.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    gran = (granularity or "daily").strip().lower()
+    if gran not in ("daily", "weekly", "monthly"):
+        gran = "daily"
+
+    norm_range, cur_start, cur_end, prev_start, prev_end, comparison_label = _resolve_date_window(
+        range, start_date, end_date
+    )
+
+    # --- KPI totals (all-time baselines + selected period counts) ---
+    cursor.execute("SELECT COUNT(*) AS total, COALESCE(SUM(credits), 0) AS liability FROM users")
+    u_all = cursor.fetchone()
+    total_users_all = int(u_all["total"] or 0)
+    net_credit_liability = int(u_all["liability"] or 0)
+
+    cursor.execute("SELECT COUNT(*) AS total FROM datasets")
+    total_datasets_all = int(cursor.fetchone()["total"] or 0)
+
+    def _window_metrics(w_start: Optional[str], w_end: Optional[str]) -> Dict[str, int]:
+        uc, up = [], []
+        _append_date_conditions(uc, up, "created_at", w_start, w_end)
+        uw = f"WHERE {' AND '.join(uc)}" if uc else ""
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM users {uw}", up)
+        users_cnt = int(cursor.fetchone()["cnt"] or 0)
+
+        dc, dp = [], []
+        _append_date_conditions(dc, dp, "created_at", w_start, w_end)
+        dw = f"WHERE {' AND '.join(dc)}" if dc else ""
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM datasets {dw}", dp)
+        ds_cnt = int(cursor.fetchone()["cnt"] or 0)
+
+        qc, qp = [], []
+        _append_date_conditions(qc, qp, "created_at", w_start, w_end)
+        qw = f"WHERE {' AND '.join(qc)}" if qc else ""
+        cursor.execute(
+            f"""
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(CASE WHEN UPPER(COALESCE(status, 'SUCCESS')) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS ok
+            FROM queries {qw}
+            """,
+            qp,
+        )
+        qr = cursor.fetchone()
+        q_total = int(qr["total"] or 0)
+        q_ok = int(qr["ok"] or 0)
+
+        tc, tp = [], []
+        _append_date_conditions(tc, tp, "created_at", w_start, w_end)
+        tw = f"WHERE {' AND '.join(tc)}" if tc else ""
+        owner_types_sql = ",".join(f"'{t}'" for t in OWNER_EARNING_TYPES)
+        cursor.execute(
+            f"""
+            SELECT
+                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS issued,
+                COALESCE(ABS(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END)), 0) AS spent,
+                COALESCE(SUM(CASE WHEN LOWER(transaction_type) LIKE '%refund%' AND amount > 0 THEN amount ELSE 0 END), 0) AS refunded,
+                COALESCE(SUM(CASE WHEN LOWER(transaction_type) IN ({owner_types_sql}) AND amount > 0 THEN amount ELSE 0 END), 0) AS owner_earned,
+                COALESCE(ABS(SUM(CASE WHEN LOWER(transaction_type) = 'query_fee' THEN amount ELSE 0 END)), 0) AS query_fees
+            FROM credit_transactions {tw}
+            """,
+            tp,
+        )
+        tr = cursor.fetchone()
+        return {
+            "users": users_cnt,
+            "active_users": _count_active_users(cursor, w_start, w_end),
+            "datasets": ds_cnt,
+            "queries": q_total,
+            "queries_ok": q_ok,
+            "queries_failed": q_total - q_ok,
+            "issued": int(tr["issued"] or 0),
+            "spent": int(tr["spent"] or 0),
+            "refunded": int(tr["refunded"] or 0),
+            "owner_earned": int(tr["owner_earned"] or 0),
+            "query_fees": int(tr["query_fees"] or 0),
+        }
+
+    cur_m = _window_metrics(cur_start, cur_end)
+
+    # Comparison deltas
+    users_delta = active_delta = ds_delta = q_delta = issued_delta = spent_delta = None
+    if prev_start and prev_end:
+        if norm_range == "all":
+            today = datetime.datetime.utcnow().date()
+            c30_start = (today - datetime.timedelta(days=29)).isoformat()
+            c30_end = today.isoformat()
+            comp_cur = _window_metrics(c30_start, c30_end)
+            comp_prev = _window_metrics(prev_start, prev_end)
+        else:
+            comp_cur = cur_m
+            comp_prev = _window_metrics(prev_start, prev_end)
+        users_delta = _pct_delta(comp_cur["users"], comp_prev["users"])
+        active_delta = _pct_delta(comp_cur["active_users"], comp_prev["active_users"])
+        ds_delta = _pct_delta(comp_cur["datasets"], comp_prev["datasets"])
+        q_delta = _pct_delta(comp_cur["queries"], comp_prev["queries"])
+        issued_delta = _pct_delta(comp_cur["issued"], comp_prev["issued"])
+        spent_delta = _pct_delta(comp_cur["spent"], comp_prev["spent"])
+
+    success_rate = round((cur_m["queries_ok"] / cur_m["queries"]) * 100.0, 1) if cur_m["queries"] > 0 else 100.0
+
+    # --- Time-series Trends ---
+    # 1. User Registration Trend
+    u_conds, u_params = [], []
+    _append_date_conditions(u_conds, u_params, "created_at", cur_start, cur_end)
+    u_w = f"WHERE {' AND '.join(u_conds)}" if u_conds else ""
+    u_bucket = _bucket_sql("created_at", gran)
+    cursor.execute(
+        f"""
+        SELECT {u_bucket} AS bucket, COUNT(*) AS cnt
+        FROM users {u_w}
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        """,
+        u_params,
+    )
+    user_reg_trend = [
+        AdminTrendPoint(bucket=r["bucket"], count=int(r["cnt"] or 0))
+        for r in cursor.fetchall() if r["bucket"]
+    ]
+
+    # 2. Dataset Upload Trend
+    d_conds, d_params = [], []
+    _append_date_conditions(d_conds, d_params, "created_at", cur_start, cur_end)
+    d_w = f"WHERE {' AND '.join(d_conds)}" if d_conds else ""
+    d_bucket = _bucket_sql("created_at", gran)
+    cursor.execute(
+        f"""
+        SELECT {d_bucket} AS bucket, COUNT(*) AS cnt
+        FROM datasets {d_w}
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        """,
+        d_params,
+    )
+    dataset_upload_trend = [
+        AdminTrendPoint(bucket=r["bucket"], count=int(r["cnt"] or 0))
+        for r in cursor.fetchall() if r["bucket"]
+    ]
+
+    # 3. Query Activity Trend (successful vs failed)
+    q_conds, q_params = [], []
+    _append_date_conditions(q_conds, q_params, "created_at", cur_start, cur_end)
+    q_w = f"WHERE {' AND '.join(q_conds)}" if q_conds else ""
+    q_bucket = _bucket_sql("created_at", gran)
+    cursor.execute(
+        f"""
+        SELECT {q_bucket} AS bucket,
+               COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN UPPER(COALESCE(status, 'SUCCESS')) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS ok,
+               COALESCE(SUM(CASE WHEN UPPER(COALESCE(status, 'SUCCESS')) != 'SUCCESS' THEN 1 ELSE 0 END), 0) AS failed
+        FROM queries {q_w}
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        """,
+        q_params,
+    )
+    query_activity_trend = [
+        AdminQueryTrendPoint(
+            bucket=r["bucket"],
+            total=int(r["total"] or 0),
+            successful=int(r["ok"] or 0),
+            failed=int(r["failed"] or 0),
+        )
+        for r in cursor.fetchall() if r["bucket"]
+    ]
+
+    # 4. Credit Movement Trend (awarded, spent, refunded)
+    t_conds, t_params = [], []
+    _append_date_conditions(t_conds, t_params, "created_at", cur_start, cur_end)
+    t_w = f"WHERE {' AND '.join(t_conds)}" if t_conds else ""
+    t_bucket = _bucket_sql("created_at", gran)
+    cursor.execute(
+        f"""
+        SELECT {t_bucket} AS bucket,
+               COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(transaction_type) NOT LIKE '%refund%' THEN amount ELSE 0 END), 0) AS awarded,
+               COALESCE(ABS(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END)), 0) AS spent,
+               COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(transaction_type) LIKE '%refund%' THEN amount ELSE 0 END), 0) AS refunded
+        FROM credit_transactions {t_w}
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        """,
+        t_params,
+    )
+    credit_movement_trend = []
+    for r in cursor.fetchall():
+        if not r["bucket"]:
+            continue
+        aw = int(r["awarded"] or 0)
+        sp = int(r["spent"] or 0)
+        rf = int(r["refunded"] or 0)
+        credit_movement_trend.append(AdminCreditTrendPoint(
+            bucket=r["bucket"],
+            awarded=aw,
+            spent=sp,
+            refunded=rf,
+            net=(aw + rf) - sp,
+        ))
+
+    # --- Leaderboards (scoped to selected date window) ---
+    # 5. Most Active Users (by query executions)
+    aq_conds, aq_params = [], []
+    _append_date_conditions(aq_conds, aq_params, "q.created_at", cur_start, cur_end)
+    aq_w = f"WHERE {' AND '.join(aq_conds)}" if aq_conds else ""
+    cursor.execute(
+        f"""
+        SELECT u.id AS user_id, u.full_name, u.email,
+               COUNT(q.id) AS query_count,
+               COALESCE(SUM(CASE WHEN UPPER(COALESCE(q.status, 'SUCCESS')) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS ok,
+               COALESCE(SUM(CASE WHEN UPPER(COALESCE(q.status, 'SUCCESS')) != 'SUCCESS' THEN 1 ELSE 0 END), 0) AS failed,
+               MAX({_norm_ts_sql('q.created_at')}) AS last_activity
+        FROM queries q
+        JOIN users u ON q.user_id = u.id
+        {aq_w}
+        GROUP BY u.id, u.full_name, u.email
+        ORDER BY query_count DESC, last_activity DESC, u.id ASC
+        LIMIT 8
+        """,
+        aq_params,
+    )
+    most_active_users = [
+        AdminActiveUserRank(
+            user_id=r["user_id"],
+            full_name=r["full_name"],
+            email=r["email"],
+            query_count=int(r["query_count"] or 0),
+            successful_queries=int(r["ok"] or 0),
+            failed_queries=int(r["failed"] or 0),
+            last_activity=r["last_activity"],
+        )
+        for r in cursor.fetchall()
+    ]
+
+    # 6. Most Contributing Users (by dataset uploads)
+    cd_conds, cd_params = [], []
+    _append_date_conditions(cd_conds, cd_params, "d.created_at", cur_start, cur_end)
+    cd_w = f"WHERE {' AND '.join(cd_conds)}" if cd_conds else ""
+    cursor.execute(
+        f"""
+        SELECT u.id AS user_id, u.full_name, u.email,
+               COUNT(d.id) AS dataset_count,
+               COALESCE(SUM(d.rows_count), 0) AS total_rows,
+               AVG(e.overall_score) AS avg_quality
+        FROM datasets d
+        JOIN users u ON d.user_id = u.id
+        LEFT JOIN evaluations e ON d.id = e.dataset_id
+        {cd_w}
+        GROUP BY u.id, u.full_name, u.email
+        ORDER BY dataset_count DESC, total_rows DESC, u.id ASC
+        LIMIT 8
+        """,
+        cd_params,
+    )
+    most_contributing_users = [
+        AdminContributorRank(
+            user_id=r["user_id"],
+            full_name=r["full_name"],
+            email=r["email"],
+            dataset_count=int(r["dataset_count"] or 0),
+            total_rows=int(r["total_rows"] or 0),
+            avg_quality_score=round(float(r["avg_quality"]), 1) if r["avg_quality"] is not None else None,
+        )
+        for r in cursor.fetchall()
+    ]
+
+    # 7. Most Queried Datasets
+    qd_conds, qd_params = ["q.dataset_id IS NOT NULL"], []
+    _append_date_conditions(qd_conds, qd_params, "q.created_at", cur_start, cur_end)
+    qd_w = f"WHERE {' AND '.join(qd_conds)}"
+    cursor.execute(
+        f"""
+        SELECT q.dataset_id,
+               COALESCE(d.name, MAX(q.dataset_name), q.dataset_id) AS dataset_name,
+               COALESCE(d.domain, 'general') AS domain,
+               d.user_id AS owner_id,
+               u.full_name AS owner_name,
+               COUNT(q.id) AS query_count,
+               COALESCE(SUM(CASE WHEN UPPER(COALESCE(q.status, 'SUCCESS')) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS ok,
+               (SELECT COUNT(*) FROM dataset_unlocks du WHERE du.dataset_id = q.dataset_id) AS unlock_count,
+               e.overall_score AS quality_score
+        FROM queries q
+        LEFT JOIN datasets d ON q.dataset_id = d.id
+        LEFT JOIN users u ON d.user_id = u.id
+        LEFT JOIN evaluations e ON d.id = e.dataset_id
+        {qd_w}
+        GROUP BY q.dataset_id, d.name, d.domain, d.user_id, u.full_name, e.overall_score
+        ORDER BY query_count DESC, ok DESC, q.dataset_id ASC
+        LIMIT 8
+        """,
+        qd_params,
+    )
+    most_queried_datasets = [
+        AdminQueriedDatasetRank(
+            dataset_id=r["dataset_id"],
+            dataset_name=r["dataset_name"],
+            domain=r["domain"],
+            owner_id=r["owner_id"],
+            owner_name=r["owner_name"],
+            query_count=int(r["query_count"] or 0),
+            successful_queries=int(r["ok"] or 0),
+            unlock_count=int(r["unlock_count"] or 0),
+            quality_score=round(float(r["quality_score"]), 1) if r["quality_score"] is not None else None,
+        )
+        for r in cursor.fetchall()
+    ]
+
+    data_limitations = [
+        "Session sign-in events are derived from persisted session timestamps; client IP and user-agent were not historically stored for regular logins.",
+        "Credit refunds are tracked dynamically from credit_transactions; 0 indicates no refund transactions have been emitted in the database.",
+    ]
+
+    client_ip = request.client.host if request.client else None
+    log_admin_audit(
+        admin_user_id=admin["id"],
+        admin_email=admin["email"],
+        action="VIEW_ANALYTICS",
+        details=f"Analytics requested range={norm_range}, granularity={gran}",
+        ip_address=client_ip,
+    )
+
+    return AdminAnalyticsResponse(
+        range=norm_range,
+        start_date=cur_start,
+        end_date=cur_end,
+        granularity=gran,
+        comparison_label=comparison_label,
+        kpis=AdminAnalyticsKpis(
+            total_users=total_users_all if norm_range == "all" else cur_m["users"],
+            users_in_period=cur_m["users"],
+            users_delta_pct=users_delta,
+            active_users=cur_m["active_users"],
+            active_users_delta_pct=active_delta,
+            total_datasets=total_datasets_all if norm_range == "all" else cur_m["datasets"],
+            datasets_in_period=cur_m["datasets"],
+            datasets_delta_pct=ds_delta,
+            total_queries=cur_m["queries"],
+            queries_successful=cur_m["queries_ok"],
+            queries_failed=cur_m["queries_failed"],
+            query_success_rate=success_rate,
+            queries_delta_pct=q_delta,
+            total_credits_issued=cur_m["issued"],
+            total_credits_spent=cur_m["spent"],
+            total_credits_refunded=cur_m["refunded"],
+            net_credit_movement=cur_m["issued"] - cur_m["spent"],
+            net_credit_liability=net_credit_liability,
+            credits_issued_delta_pct=issued_delta,
+            credits_spent_delta_pct=spent_delta,
+            credits_earned_by_owners=cur_m["owner_earned"],
+            query_fees_collected=cur_m["query_fees"],
+        ),
+        user_registration_trend=user_reg_trend,
+        dataset_upload_trend=dataset_upload_trend,
+        query_activity_trend=query_activity_trend,
+        credit_movement_trend=credit_movement_trend,
+        most_active_users=most_active_users,
+        most_contributing_users=most_contributing_users,
+        most_queried_datasets=most_queried_datasets,
+        data_limitations=data_limitations,
     )
 
 
@@ -168,14 +912,18 @@ def get_admin_users(
     request: Request,
     page: int = Query(1, ge=1, description="Page number, 1-indexed"),
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
-    search: Optional[str] = Query(None, description="Search by user name or email"),
+    search: Optional[str] = Query(None, description="Search by user name, email, or user ID"),
     role: Optional[str] = Query(None, description="Filter by role: admin, user, all"),
-    sort_by: Optional[str] = Query("created_at", description="Sort by: created_at, credits, reputation_score, full_name"),
+    activity: Optional[str] = Query(None, description="Filter by activity: all, active, has_queries, has_datasets, inactive"),
+    start_date: Optional[str] = Query(None, description="Start registration date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End registration date YYYY-MM-DD"),
+    sort_by: Optional[str] = Query("created_at", description="Sort by: created_at, last_activity, credits, reputation_score, full_name, queries_count, datasets_count"),
     sort_order: Optional[str] = Query("desc", description="Sort order: asc, desc"),
-    admin: dict = Depends(get_current_admin_user)
+    admin: dict = Depends(get_current_admin_user),
 ):
     """
     Searchable, filterable, paginated directory of registered users for administrators.
+    Computes datasets_count, queries_count, and last_activity without N+1 queries.
     Never exposes passwords, tokens, or hashes.
     """
     conn = get_db_connection()
@@ -186,8 +934,8 @@ def get_admin_users(
 
     if search and search.strip():
         term = f"%{search.strip().lower()}%"
-        conditions.append("(LOWER(u.full_name) LIKE ? OR LOWER(u.email) LIKE ?)")
-        params.extend([term, term])
+        conditions.append("(LOWER(u.full_name) LIKE ? OR LOWER(u.email) LIKE ? OR LOWER(u.id) LIKE ?)")
+        params.extend([term, term, term])
 
     if role and role.strip() and role.strip().lower() != "all":
         if role.strip().lower() == "admin":
@@ -195,50 +943,93 @@ def get_admin_users(
         elif role.strip().lower() == "user":
             conditions.append("u.is_admin = 0")
 
+    if activity and activity.strip() and activity.strip().lower() != "all":
+        act = activity.strip().lower()
+        if act == "has_queries":
+            conditions.append("EXISTS (SELECT 1 FROM queries q WHERE q.user_id = u.id)")
+        elif act == "has_datasets":
+            conditions.append("EXISTS (SELECT 1 FROM datasets d WHERE d.user_id = u.id)")
+        elif act == "active":
+            conditions.append("(EXISTS (SELECT 1 FROM queries q WHERE q.user_id = u.id) OR EXISTS (SELECT 1 FROM datasets d WHERE d.user_id = u.id))")
+        elif act in ("inactive", "no_activity"):
+            conditions.append("(NOT EXISTS (SELECT 1 FROM queries q WHERE q.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM datasets d WHERE d.user_id = u.id))")
+
+    _append_date_conditions(conditions, params, "u.created_at", start_date, end_date)
+
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    # Total count
-    count_query = f"SELECT COUNT(*) AS total FROM users u {where_clause}"
-    cursor.execute(count_query, params)
-    total = cursor.fetchone()["total"] or 0
+    cursor.execute(f"SELECT COUNT(*) AS total FROM users u {where_clause}", params)
+    total = int(cursor.fetchone()["total"] or 0)
 
-    # Sort column validation
     valid_sort_cols = {
-        "created_at": "u.created_at",
+        "created_at": _norm_ts_sql("u.created_at"),
+        "last_activity": "last_activity",
         "credits": "u.credits",
         "reputation_score": "u.reputation_score",
-        "full_name": "u.full_name"
+        "full_name": "LOWER(u.full_name)",
+        "queries_count": "queries_count",
+        "datasets_count": "datasets_count",
     }
-    col = valid_sort_cols.get(sort_by or "created_at", "u.created_at")
+    col = valid_sort_cols.get(sort_by or "created_at", _norm_ts_sql("u.created_at"))
     order = "ASC" if (sort_order or "desc").lower() == "asc" else "DESC"
 
     offset = (page - 1) * limit
     data_query = f"""
+        WITH user_activity AS (
+            SELECT user_id, MAX({_norm_ts_sql('ts')}) AS last_ts
+            FROM (
+                SELECT user_id, created_at AS ts FROM queries
+                UNION ALL
+                SELECT user_id, created_at AS ts FROM datasets
+                UNION ALL
+                SELECT user_id, created_at AS ts FROM dataset_versions
+                UNION ALL
+                SELECT user_id, created_at AS ts FROM dataset_unlocks
+                UNION ALL
+                SELECT user_id, created_at AS ts FROM credit_transactions
+            )
+            GROUP BY user_id
+        ),
+        ds_counts AS (
+            SELECT user_id, COUNT(*) AS cnt FROM datasets GROUP BY user_id
+        ),
+        q_counts AS (
+            SELECT user_id, COUNT(*) AS cnt FROM queries GROUP BY user_id
+        )
         SELECT u.id, u.email, u.full_name, u.credits, u.reputation_score, u.is_admin, u.created_at,
-               (SELECT COUNT(*) FROM datasets d WHERE d.user_id = u.id) AS datasets_count,
-               (SELECT COUNT(*) FROM queries q WHERE q.user_id = u.id) AS queries_count
+               COALESCE(dc.cnt, 0) AS datasets_count,
+               COALESCE(qc.cnt, 0) AS queries_count,
+               COALESCE(ua.last_ts, {_norm_ts_sql('u.created_at')}) AS last_activity
         FROM users u
+        LEFT JOIN ds_counts dc ON dc.user_id = u.id
+        LEFT JOIN q_counts qc ON qc.user_id = u.id
+        LEFT JOIN user_activity ua ON ua.user_id = u.id
         {where_clause}
         ORDER BY {col} {order}, u.id {order}
         LIMIT ? OFFSET ?
     """
-    data_params = list(params) + [limit, offset]
-    cursor.execute(data_query, data_params)
+    cursor.execute(data_query, list(params) + [limit, offset])
     rows = cursor.fetchall()
 
     items = []
     for r in rows:
+        ds_cnt = int(r["datasets_count"] or 0)
+        q_cnt = int(r["queries_count"] or 0)
+        is_adm = bool(r["is_admin"]) if "is_admin" in r.keys() else False
+        is_act = (ds_cnt > 0 or q_cnt > 0)
         items.append(AdminUserItem(
             id=r["id"],
             email=r["email"],
             full_name=r["full_name"],
-            credits=r["credits"] or 0,
-            reputation_score=r["reputation_score"] if "reputation_score" in r.keys() else 50,
-            is_admin=bool(r["is_admin"]) if "is_admin" in r.keys() else False,
-            account_status="Admin" if bool(r["is_admin"] if "is_admin" in r.keys() else 0) else "Active",
-            datasets_count=r["datasets_count"] or 0,
-            queries_count=r["queries_count"] or 0,
-            created_at=r["created_at"]
+            credits=int(r["credits"] or 0),
+            reputation_score=int(r["reputation_score"]) if "reputation_score" in r.keys() and r["reputation_score"] is not None else 50,
+            is_admin=is_adm,
+            account_status="Admin" if is_adm else ("Active" if is_act else "Inactive"),
+            is_active=is_act,
+            datasets_count=ds_cnt,
+            queries_count=q_cnt,
+            last_activity=r["last_activity"],
+            created_at=r["created_at"],
         ))
 
     has_more = (offset + len(items)) < total
@@ -249,7 +1040,7 @@ def get_admin_users(
         admin_email=admin["email"],
         action="LIST_USERS",
         details=f"Listed users page={page}, limit={limit}, search={search}",
-        ip_address=client_ip
+        ip_address=client_ip,
     )
 
     return AdminUserListResponse(
@@ -257,7 +1048,7 @@ def get_admin_users(
         total=total,
         page=page,
         limit=limit,
-        has_more=has_more
+        has_more=has_more,
     )
 
 
@@ -265,11 +1056,12 @@ def get_admin_users(
 def get_admin_user_detail(
     user_id: str,
     request: Request,
-    admin: dict = Depends(get_current_admin_user)
+    admin: dict = Depends(get_current_admin_user),
 ):
     """
-    Returns complete user profile, uploaded datasets, recent query history,
-    and credit transactions for administrative inspection.
+    Returns complete user profile, uploaded datasets with quality ratings, reward breakdowns,
+    versions, real DuckDB storage availability, query stats, and transaction summaries.
+    Zero N+1 queries; never exposes passwords, hashes, or session credentials.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -283,35 +1075,98 @@ def get_admin_user_detail(
     if not user_row:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User with ID '{user_id}' not found."
+            detail=f"User with ID '{user_id}' not found.",
         )
 
-    # Aggregates
+    # Aggregates in compact queries
     cursor.execute("SELECT COUNT(*) AS total FROM datasets WHERE user_id = ?", (user_id,))
-    total_datasets = cursor.fetchone()["total"] or 0
+    total_datasets = int(cursor.fetchone()["total"] or 0)
 
-    cursor.execute("SELECT COUNT(*) AS total FROM queries WHERE user_id = ?", (user_id,))
-    total_queries = cursor.fetchone()["total"] or 0
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN UPPER(COALESCE(status, 'SUCCESS')) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS ok
+        FROM queries
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    )
+    q_agg = cursor.fetchone()
+    total_queries = int(q_agg["total"] or 0)
+    total_queries_successful = int(q_agg["ok"] or 0)
+    total_queries_failed = total_queries - total_queries_successful
+    query_success_rate = round((total_queries_successful / total_queries) * 100.0, 1) if total_queries > 0 else 100.0
 
-    cursor.execute("SELECT SUM(amount) AS total FROM credit_transactions WHERE user_id = ? AND amount > 0", (user_id,))
-    total_credits_earned = cursor.fetchone()["total"] or 0
+    cursor.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS earned,
+            COALESCE(ABS(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END)), 0) AS spent,
+            COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(transaction_type) LIKE '%refund%' THEN amount ELSE 0 END), 0) AS refunded
+        FROM credit_transactions
+        WHERE user_id = ?
+        """,
+        (user_id,),
+    )
+    tx_agg = cursor.fetchone()
+    total_credits_earned = int(tx_agg["earned"] or 0)
+    total_credits_spent = int(tx_agg["spent"] or 0)
+    total_credits_refunded = int(tx_agg["refunded"] or 0)
 
-    cursor.execute("SELECT ABS(SUM(amount)) AS total FROM credit_transactions WHERE user_id = ? AND amount < 0", (user_id,))
-    total_credits_spent = cursor.fetchone()["total"] or 0
+    cursor.execute("SELECT COUNT(*) AS total FROM dataset_unlocks WHERE user_id = ?", (user_id,))
+    total_unlocks = int(cursor.fetchone()["total"] or 0)
 
-    # User's uploaded datasets
-    cursor.execute("""
+    cursor.execute("SELECT COUNT(*) AS total FROM dataset_versions WHERE user_id = ?", (user_id,))
+    total_improvements = int(cursor.fetchone()["total"] or 0)
+
+    # Last activity timestamp across all user tables
+    cursor.execute(
+        f"""
+        SELECT MAX({_norm_ts_sql('ts')}) AS last_ts
+        FROM (
+            SELECT created_at AS ts FROM users WHERE id = ?
+            UNION ALL
+            SELECT created_at AS ts FROM datasets WHERE user_id = ?
+            UNION ALL
+            SELECT created_at AS ts FROM queries WHERE user_id = ?
+            UNION ALL
+            SELECT created_at AS ts FROM dataset_versions WHERE user_id = ?
+            UNION ALL
+            SELECT created_at AS ts FROM dataset_unlocks WHERE user_id = ?
+            UNION ALL
+            SELECT created_at AS ts FROM credit_transactions WHERE user_id = ?
+        )
+        """,
+        (user_id, user_id, user_id, user_id, user_id, user_id),
+    )
+    last_act_row = cursor.fetchone()
+    last_activity = last_act_row["last_ts"] if last_act_row else user_row["created_at"]
+
+    # User's uploaded datasets (batch versions, rewards, queries, DuckDB availability -> zero N+1)
+    cursor.execute(
+        f"""
         SELECT d.id, d.name, d.filename, d.domain, d.rows_count, d.columns_count, d.unlock_price, d.created_at,
                e.overall_score AS quality_score
         FROM datasets d
         LEFT JOIN evaluations e ON d.id = e.dataset_id
         WHERE d.user_id = ?
-        ORDER BY d.created_at DESC
-    """, (user_id,))
+        ORDER BY {_norm_ts_sql('d.created_at')} DESC, d.id DESC
+        """,
+        (user_id,),
+    )
     ds_rows = cursor.fetchall()
-    datasets = [
-        AdminUserDatasetItem(
-            id=r["id"],
+    ds_ids = [r["id"] for r in ds_rows]
+    rewards_map, versions_map, query_counts_map = _batch_dataset_rewards_and_versions(cursor, ds_ids)
+    existing_duckdb_ids = get_existing_dataset_ids()
+
+    datasets = []
+    for r in ds_rows:
+        ds_id = r["id"]
+        v_rows = versions_map.get(ds_id, [])
+        rew = rewards_map.get(ds_id, {"basic": 0, "quality": 0, "improvement": 0})
+        availability = "Available" if ds_id in existing_duckdb_ids else "Metadata Only"
+        datasets.append(AdminUserDatasetItem(
+            id=ds_id,
             name=r["name"],
             filename=r["filename"],
             domain=r["domain"],
@@ -319,24 +1174,33 @@ def get_admin_user_detail(
             columns_count=r["columns_count"],
             quality_score=round(float(r["quality_score"]), 1) if r["quality_score"] is not None else None,
             unlock_price=r["unlock_price"] or 10,
-            created_at=r["created_at"]
-        ) for r in ds_rows
-    ]
+            query_count=query_counts_map.get(ds_id, 0),
+            basic_upload_reward=rew["basic"],
+            quality_reward=rew["quality"],
+            improvement_rewards=rew["improvement"],
+            created_at=r["created_at"],
+            version_count=len(v_rows) + 1,
+            availability=availability,
+            versions=v_rows,
+        ))
 
-    # Recent queries
-    cursor.execute("""
-        SELECT id, query_text, dataset_name, generated_sql, status, execution_time_ms,
+    # Recent queries (latest 20 for quick overview preview; full paginated history via /users/{id}/queries)
+    cursor.execute(
+        f"""
+        SELECT id, query_text, dataset_id, dataset_name, generated_sql, status, execution_time_ms,
                result_count, credits_charged, error_message, created_at
         FROM queries
         WHERE user_id = ?
-        ORDER BY created_at DESC
+        ORDER BY {_norm_ts_sql('created_at')} DESC, id DESC
         LIMIT 20
-    """, (user_id,))
-    query_rows = cursor.fetchall()
+        """,
+        (user_id,),
+    )
     recent_queries = [
         {
             "id": r["id"],
             "natural_prompt": r["query_text"],
+            "dataset_id": r["dataset_id"],
             "dataset_name": r["dataset_name"] or "Cross-Catalog",
             "generated_sql": r["generated_sql"] or "-- No SQL generated",
             "status": r["status"] or "SUCCESS",
@@ -344,19 +1208,22 @@ def get_admin_user_detail(
             "rows_returned": r["result_count"] or 0,
             "credits_charged": r["credits_charged"] or 0,
             "error_message": r["error_message"],
-            "timestamp": r["created_at"]
-        } for r in query_rows
+            "timestamp": r["created_at"],
+        }
+        for r in cursor.fetchall()
     ]
 
-    # Recent transactions
-    cursor.execute("""
+    # Recent transactions (latest 20 for quick overview preview; full paginated ledger via /users/{id}/transactions)
+    cursor.execute(
+        f"""
         SELECT id, amount, transaction_type, description, status, created_at
         FROM credit_transactions
         WHERE user_id = ?
-        ORDER BY created_at DESC
+        ORDER BY {_norm_ts_sql('created_at')} DESC, id DESC
         LIMIT 20
-    """, (user_id,))
-    tx_rows = cursor.fetchall()
+        """,
+        (user_id,),
+    )
     recent_transactions = [
         {
             "id": r["id"],
@@ -365,8 +1232,9 @@ def get_admin_user_detail(
             "description": r["description"],
             "status": r["status"],
             "balance_impact": f"+{r['amount']}" if r["amount"] > 0 else f"{r['amount']}",
-            "created_at": r["created_at"]
-        } for r in tx_rows
+            "created_at": r["created_at"],
+        }
+        for r in cursor.fetchall()
     ]
 
     client_ip = request.client.host if request.client else None
@@ -376,25 +1244,33 @@ def get_admin_user_detail(
         action="VIEW_USER_DETAIL",
         target_resource=user_id,
         details=f"Viewed user detail for {user_row['email']}",
-        ip_address=client_ip
+        ip_address=client_ip,
     )
 
+    is_adm = bool(user_row["is_admin"]) if "is_admin" in user_row.keys() else False
     return AdminUserDetailResponse(
         id=user_row["id"],
         email=user_row["email"],
         full_name=user_row["full_name"],
-        credits=user_row["credits"] or 0,
-        reputation_score=user_row["reputation_score"] if "reputation_score" in user_row.keys() else 50,
-        is_admin=bool(user_row["is_admin"]) if "is_admin" in user_row.keys() else False,
-        account_status="Admin" if bool(user_row["is_admin"] if "is_admin" in user_row.keys() else 0) else "Active",
+        credits=int(user_row["credits"] or 0),
+        reputation_score=int(user_row["reputation_score"]) if "reputation_score" in user_row.keys() and user_row["reputation_score"] is not None else 50,
+        is_admin=is_adm,
+        account_status="Admin" if is_adm else ("Active" if (total_datasets > 0 or total_queries > 0) else "Inactive"),
         created_at=user_row["created_at"],
+        last_activity=last_activity,
         total_datasets=total_datasets,
         total_queries=total_queries,
+        total_queries_successful=total_queries_successful,
+        total_queries_failed=total_queries_failed,
+        query_success_rate=query_success_rate,
         total_credits_earned=total_credits_earned,
         total_credits_spent=total_credits_spent,
+        total_credits_refunded=total_credits_refunded,
+        total_unlocks=total_unlocks,
+        total_improvements=total_improvements,
         datasets=datasets,
         recent_queries=recent_queries,
-        recent_transactions=recent_transactions
+        recent_transactions=recent_transactions,
     )
 
 
@@ -403,27 +1279,37 @@ def get_admin_datasets(
     request: Request,
     page: int = Query(1, ge=1, description="Page number, 1-indexed"),
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
-    search: Optional[str] = Query(None, description="Search by dataset title, filename, domain, or owner"),
+    search: Optional[str] = Query(None, description="Search by dataset title, ID, filename, domain, or owner"),
     domain: Optional[str] = Query(None, description="Filter by domain"),
     owner_id: Optional[str] = Query(None, description="Filter by owner user ID"),
-    sort_by: Optional[str] = Query("created_at", description="Sort by: created_at, rows_count, quality_score, name"),
+    availability: Optional[str] = Query(None, description="Filter by storage availability: all, available, missing"),
+    start_date: Optional[str] = Query(None, description="Start upload date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End upload date YYYY-MM-DD"),
+    sort_by: Optional[str] = Query("created_at", description="Sort by: created_at, rows_count, quality_score, query_count, unlock_price, name"),
     sort_order: Optional[str] = Query("desc", description="Sort order: asc, desc"),
-    admin: dict = Depends(get_current_admin_user)
+    admin: dict = Depends(get_current_admin_user),
 ):
     """
     Returns platform-wide dataset registry with ownership, quality evaluations,
-    and storage availability. Avoids unrestricted raw file data dumps.
+    query usage, version counts, and real DuckDB storage availability.
+    Avoids unrestricted raw file data dumps.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
+
+    existing_duckdb_ids = get_existing_dataset_ids()
+
+    # Available distinct domains for filter dropdown
+    cursor.execute("SELECT DISTINCT LOWER(domain) AS dom FROM datasets WHERE domain IS NOT NULL ORDER BY dom ASC")
+    available_domains = [r["dom"] for r in cursor.fetchall() if r["dom"]]
 
     conditions = []
     params: List[Any] = []
 
     if search and search.strip():
         term = f"%{search.strip().lower()}%"
-        conditions.append("(LOWER(d.name) LIKE ? OR LOWER(d.filename) LIKE ? OR LOWER(d.domain) LIKE ? OR LOWER(u.email) LIKE ? OR LOWER(u.full_name) LIKE ?)")
-        params.extend([term, term, term, term, term])
+        conditions.append("(LOWER(d.id) LIKE ? OR LOWER(d.name) LIKE ? OR LOWER(d.filename) LIKE ? OR LOWER(d.domain) LIKE ? OR LOWER(u.email) LIKE ? OR LOWER(u.full_name) LIKE ?)")
+        params.extend([term, term, term, term, term, term])
 
     if domain and domain.strip() and domain.strip().lower() != "all":
         conditions.append("LOWER(d.domain) = ?")
@@ -433,51 +1319,84 @@ def get_admin_datasets(
         conditions.append("d.user_id = ?")
         params.append(owner_id.strip())
 
+    _append_date_conditions(conditions, params, "d.created_at", start_date, end_date)
+
+    if availability and availability.strip().lower() in ("available", "missing"):
+        avail_mode = availability.strip().lower()
+        if existing_duckdb_ids:
+            ph = ",".join("?" for _ in existing_duckdb_ids)
+            if avail_mode == "available":
+                conditions.append(f"d.id IN ({ph})")
+            else:
+                conditions.append(f"d.id NOT IN ({ph})")
+            params.extend(list(existing_duckdb_ids))
+        else:
+            if avail_mode == "available":
+                conditions.append("1 = 0")
+
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    # Total count
-    count_query = f"""
+    cursor.execute(
+        f"""
         SELECT COUNT(*) AS total
         FROM datasets d
         JOIN users u ON d.user_id = u.id
         LEFT JOIN evaluations e ON d.id = e.dataset_id
         {where_clause}
-    """
-    cursor.execute(count_query, params)
-    total = cursor.fetchone()["total"] or 0
+        """,
+        params,
+    )
+    total = int(cursor.fetchone()["total"] or 0)
 
     valid_sort_cols = {
-        "created_at": "d.created_at",
+        "created_at": _norm_ts_sql("d.created_at"),
         "rows_count": "d.rows_count",
-        "quality_score": "e.overall_score",
-        "name": "d.name"
+        "quality_score": "COALESCE(e.overall_score, -1)",
+        "query_count": "query_count",
+        "unlock_price": "COALESCE(d.unlock_price, 10)",
+        "name": "LOWER(d.name)",
     }
-    col = valid_sort_cols.get(sort_by or "created_at", "d.created_at")
+    col = valid_sort_cols.get(sort_by or "created_at", _norm_ts_sql("d.created_at"))
     order = "ASC" if (sort_order or "desc").lower() == "asc" else "DESC"
 
     offset = (page - 1) * limit
     data_query = f"""
+        WITH q_counts AS (
+            SELECT dataset_id, COUNT(*) AS cnt FROM queries WHERE dataset_id IS NOT NULL GROUP BY dataset_id
+        ),
+        u_counts AS (
+            SELECT dataset_id, COUNT(*) AS cnt FROM dataset_unlocks GROUP BY dataset_id
+        ),
+        v_counts AS (
+            SELECT dataset_id, COUNT(*) AS cnt FROM dataset_versions GROUP BY dataset_id
+        )
         SELECT d.id, d.name, d.filename, d.domain, d.rows_count, d.columns_count,
                d.content_summary, d.unlock_price, d.created_at,
                u.id AS owner_id, u.full_name AS owner_name, u.email AS owner_email,
                e.quality_score, e.domain_relevance_score, e.overall_score,
                e.status AS evaluation_status, e.credits_awarded,
-               (SELECT COUNT(*) FROM dataset_unlocks du WHERE du.dataset_id = d.id) AS unlock_count
+               COALESCE(uc.cnt, 0) AS unlock_count,
+               COALESCE(qc.cnt, 0) AS query_count,
+               COALESCE(vc.cnt, 0) AS extra_versions
         FROM datasets d
         JOIN users u ON d.user_id = u.id
         LEFT JOIN evaluations e ON d.id = e.dataset_id
+        LEFT JOIN u_counts uc ON uc.dataset_id = d.id
+        LEFT JOIN q_counts qc ON qc.dataset_id = d.id
+        LEFT JOIN v_counts vc ON vc.dataset_id = d.id
         {where_clause}
         ORDER BY {col} {order}, d.id {order}
         LIMIT ? OFFSET ?
     """
-    data_params = list(params) + [limit, offset]
-    cursor.execute(data_query, data_params)
+    cursor.execute(data_query, list(params) + [limit, offset])
     rows = cursor.fetchall()
 
     items = []
     for r in rows:
+        ds_id = r["id"]
+        avail = "Available" if ds_id in existing_duckdb_ids else "Metadata Only"
         items.append(AdminDatasetItem(
-            id=r["id"],
+            id=ds_id,
             title=r["name"],
             name=r["name"],
             filename=r["filename"],
@@ -493,10 +1412,12 @@ def get_admin_datasets(
             evaluation_status=r["evaluation_status"] or "pending",
             credits_awarded=r["credits_awarded"],
             unlock_price=r["unlock_price"] or 10,
-            unlock_count=r["unlock_count"] or 0,
-            availability="Available",
+            unlock_count=int(r["unlock_count"] or 0),
+            query_count=int(r["query_count"] or 0),
+            version_count=int(r["extra_versions"] or 0) + 1,
+            availability=avail,
             content_summary=r["content_summary"] or "",
-            created_at=r["created_at"]
+            created_at=r["created_at"],
         ))
 
     has_more = (offset + len(items)) < total
@@ -507,7 +1428,7 @@ def get_admin_datasets(
         admin_email=admin["email"],
         action="LIST_DATASETS",
         details=f"Listed datasets page={page}, limit={limit}",
-        ip_address=client_ip
+        ip_address=client_ip,
     )
 
     return AdminDatasetListResponse(
@@ -515,7 +1436,166 @@ def get_admin_datasets(
         total=total,
         page=page,
         limit=limit,
-        has_more=has_more
+        has_more=has_more,
+        available_domains=available_domains,
+    )
+
+
+@router.get("/datasets/{dataset_id}", response_model=AdminDatasetDetailResponse)
+def get_admin_dataset_detail(
+    dataset_id: str,
+    request: Request,
+    admin: dict = Depends(get_current_admin_user),
+):
+    """
+    Detailed administrative inspection of a single dataset: owner, schema structure (never raw rows),
+    evaluation scores, reward breakdown, query usage stats, and version history.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT d.id, d.name, d.filename, d.domain, d.rows_count, d.columns_count,
+               d.schema_json, d.content_summary, d.unlock_price, d.created_at,
+               u.id AS owner_id, u.full_name AS owner_name, u.email AS owner_email
+        FROM datasets d
+        JOIN users u ON d.user_id = u.id
+        WHERE d.id = ?
+        """,
+        (dataset_id,),
+    )
+    ds = cursor.fetchone()
+    if not ds:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset with ID '{dataset_id}' not found.",
+        )
+
+    # Parse schema columns (structure only, never raw data rows)
+    schema_columns: List[Dict[str, str]] = []
+    try:
+        parsed_schema = json.loads(ds["schema_json"] or "{}")
+        if isinstance(parsed_schema, dict):
+            schema_columns = [{"name": str(k), "type": str(v)} for k, v in parsed_schema.items()]
+    except Exception:
+        schema_columns = []
+
+    # Evaluation record
+    cursor.execute("SELECT * FROM evaluations WHERE dataset_id = ?", (dataset_id,))
+    ev = cursor.fetchone()
+    evaluation = None
+    if ev:
+        evaluation = {
+            "id": ev["id"],
+            "status": ev["status"],
+            "progress": ev["progress"],
+            "quality_score": round(float(ev["quality_score"]), 1),
+            "schema_fidelity_score": round(float(ev["schema_fidelity_score"]), 1),
+            "completeness_score": round(float(ev["completeness_score"]), 1),
+            "domain_relevance_score": round(float(ev["domain_relevance_score"]), 1),
+            "overall_score": round(float(ev["overall_score"]), 1),
+            "credits_awarded": int(ev["credits_awarded"] or 0),
+            "error_message": ev["error_message"],
+            "updated_at": ev["updated_at"],
+            "created_at": ev["created_at"],
+        }
+
+    # Usage stats
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN UPPER(COALESCE(status, 'SUCCESS')) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS ok,
+               COUNT(DISTINCT user_id) AS unique_queriers
+        FROM queries
+        WHERE dataset_id = ?
+        """,
+        (dataset_id,),
+    )
+    q_stat = cursor.fetchone()
+    query_count = int(q_stat["total"] or 0)
+    successful_queries = int(q_stat["ok"] or 0)
+    failed_queries = query_count - successful_queries
+    unique_queriers = int(q_stat["unique_queriers"] or 0)
+
+    cursor.execute("SELECT COUNT(*) AS cnt FROM dataset_unlocks WHERE dataset_id = ?", (dataset_id,))
+    unlock_count = int(cursor.fetchone()["cnt"] or 0)
+
+    # Rewards & versions
+    rewards_map, versions_map, _ = _batch_dataset_rewards_and_versions(cursor, [dataset_id])
+    rew = rewards_map.get(dataset_id, {"basic": 0, "quality": 0, "improvement": 0})
+    versions = versions_map.get(dataset_id, [])
+
+    # Recent query metadata (no raw dataset content)
+    cursor.execute(
+        f"""
+        SELECT q.id, q.user_id, u.full_name AS user_name, u.email AS user_email,
+               q.query_text, q.status, q.execution_time_ms, q.result_count, q.credits_charged, q.created_at
+        FROM queries q
+        JOIN users u ON q.user_id = u.id
+        WHERE q.dataset_id = ?
+        ORDER BY {_norm_ts_sql('q.created_at')} DESC, q.id DESC
+        LIMIT 10
+        """,
+        (dataset_id,),
+    )
+    recent_queries = [
+        {
+            "id": r["id"],
+            "user_id": r["user_id"],
+            "user_name": r["user_name"],
+            "user_email": r["user_email"],
+            "natural_prompt": r["query_text"],
+            "status": r["status"] or "SUCCESS",
+            "execution_time_ms": r["execution_time_ms"] or 0,
+            "rows_returned": r["result_count"] or 0,
+            "credits_charged": r["credits_charged"] or 0,
+            "timestamp": r["created_at"],
+        }
+        for r in cursor.fetchall()
+    ]
+
+    existing_duckdb_ids = get_existing_dataset_ids()
+    availability = "Available" if dataset_id in existing_duckdb_ids else "Metadata Only"
+
+    client_ip = request.client.host if request.client else None
+    log_admin_audit(
+        admin_user_id=admin["id"],
+        admin_email=admin["email"],
+        action="VIEW_DATASET_DETAIL",
+        target_resource=dataset_id,
+        details=f"Viewed dataset detail for '{ds['name']}'",
+        ip_address=client_ip,
+    )
+
+    return AdminDatasetDetailResponse(
+        id=ds["id"],
+        name=ds["name"],
+        filename=ds["filename"],
+        domain=ds["domain"],
+        owner_id=ds["owner_id"],
+        owner_name=ds["owner_name"],
+        owner_email=ds["owner_email"],
+        rows_count=ds["rows_count"],
+        columns_count=ds["columns_count"],
+        schema_columns=schema_columns,
+        content_summary=ds["content_summary"] or "",
+        unlock_price=ds["unlock_price"] or 10,
+        unlock_count=unlock_count,
+        query_count=query_count,
+        successful_queries=successful_queries,
+        failed_queries=failed_queries,
+        unique_queriers=unique_queriers,
+        availability=availability,
+        created_at=ds["created_at"],
+        evaluation=evaluation,
+        basic_upload_reward=rew["basic"],
+        quality_reward=rew["quality"],
+        improvement_rewards=rew["improvement"],
+        total_rewards=rew["basic"] + rew["quality"] + rew["improvement"],
+        version_count=len(versions) + 1,
+        versions=versions,
+        recent_queries=recent_queries,
     )
 
 
@@ -527,14 +1607,15 @@ def get_admin_queries(
     search: Optional[str] = Query(None, description="Search prompt, SQL, dataset name, or user email"),
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     dataset_id: Optional[str] = Query(None, description="Filter by dataset ID"),
-    status: Optional[str] = Query(None, description="Filter by status (SUCCESS, SQL_REJECTED, etc.)"),
+    status: Optional[str] = Query(None, description="Filter by status (SUCCESS, FAILED, SQL_REJECTED, INSUFFICIENT_CREDITS)"),
     start_date: Optional[str] = Query(None, description="Start date filter YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="End date filter YYYY-MM-DD"),
-    admin: dict = Depends(get_current_admin_user)
+    sort_order: Optional[str] = Query("desc", description="Sort order: desc, asc"),
+    admin: dict = Depends(get_current_admin_user),
 ):
     """
-    Global query execution audit log across all users.
-    Exposes prompt and generated SQL to administrators, but keeps individual user views isolated.
+    Global query execution audit log across all users with summary analytics.
+    Exposes prompt and generated SQL to administrators without exposing raw dataset rows.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -544,8 +1625,8 @@ def get_admin_queries(
 
     if search and search.strip():
         term = f"%{search.strip().lower()}%"
-        conditions.append("(LOWER(q.query_text) LIKE ? OR LOWER(COALESCE(q.generated_sql, '')) LIKE ? OR LOWER(COALESCE(q.dataset_name, '')) LIKE ? OR LOWER(u.email) LIKE ? OR LOWER(u.full_name) LIKE ?)")
-        params.extend([term, term, term, term, term])
+        conditions.append("(LOWER(q.query_text) LIKE ? OR LOWER(COALESCE(q.generated_sql, '')) LIKE ? OR LOWER(COALESCE(q.dataset_name, '')) LIKE ? OR LOWER(u.email) LIKE ? OR LOWER(u.full_name) LIKE ? OR LOWER(q.id) LIKE ?)")
+        params.extend([term, term, term, term, term, term])
 
     if user_id and user_id.strip():
         conditions.append("q.user_id = ?")
@@ -556,51 +1637,61 @@ def get_admin_queries(
         params.append(dataset_id.strip())
 
     if status and status.strip() and status.strip().upper() != "ALL":
-        conditions.append("UPPER(q.status) = ?")
-        params.append(status.strip().upper())
+        st = status.strip().upper()
+        if st == "FAILED":
+            conditions.append("UPPER(COALESCE(q.status, 'SUCCESS')) != 'SUCCESS'")
+        else:
+            conditions.append("UPPER(COALESCE(q.status, 'SUCCESS')) = ?")
+            params.append(st)
 
-    if start_date and start_date.strip():
-        conditions.append("q.created_at >= ?")
-        params.append(start_date.strip())
-
-    if end_date and end_date.strip():
-        # Include full end date up to end of day if YYYY-MM-DD format
-        ed = end_date.strip()
-        if len(ed) == 10:
-            ed = f"{ed}T23:59:59"
-        conditions.append("q.created_at <= ?")
-        params.append(ed)
+    _append_date_conditions(conditions, params, "q.created_at", start_date, end_date)
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    # Total count
-    count_query = f"""
-        SELECT COUNT(*) AS total
+    cursor.execute(
+        f"""
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN UPPER(COALESCE(q.status, 'SUCCESS')) = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS ok,
+               COALESCE(AVG(COALESCE(q.execution_time_ms, 0)), 0) AS avg_ms,
+               COALESCE(SUM(COALESCE(q.credits_charged, 0)), 0) AS total_charged
         FROM queries q
         JOIN users u ON q.user_id = u.id
         {where_clause}
-    """
-    cursor.execute(count_query, params)
-    total = cursor.fetchone()["total"] or 0
+        """,
+        params,
+    )
+    agg = cursor.fetchone()
+    total = int(agg["total"] or 0)
+    ok_cnt = int(agg["ok"] or 0)
+    fail_cnt = total - ok_cnt
+    summary = {
+        "total_queries": total,
+        "successful_queries": ok_cnt,
+        "failed_queries": fail_cnt,
+        "success_rate": round((ok_cnt / total) * 100.0, 1) if total > 0 else 100.0,
+        "avg_execution_time_ms": int(round(float(agg["avg_ms"] or 0))),
+        "total_credits_charged": int(agg["total_charged"] or 0),
+    }
 
+    order = "ASC" if (sort_order or "desc").lower() == "asc" else "DESC"
     offset = (page - 1) * limit
-    data_query = f"""
+    cursor.execute(
+        f"""
         SELECT q.id, q.user_id, q.dataset_id, q.dataset_name, q.query_text, q.generated_sql,
                q.execution_time_ms, q.result_count, q.status, q.credits_charged, q.error_message, q.created_at,
                u.email AS user_email, u.full_name AS user_name
         FROM queries q
         JOIN users u ON q.user_id = u.id
         {where_clause}
-        ORDER BY q.created_at DESC, q.id DESC
+        ORDER BY {_norm_ts_sql('q.created_at')} {order}, q.id {order}
         LIMIT ? OFFSET ?
-    """
-    data_params = list(params) + [limit, offset]
-    cursor.execute(data_query, data_params)
+        """,
+        list(params) + [limit, offset],
+    )
     rows = cursor.fetchall()
 
-    items = []
-    for r in rows:
-        items.append(AdminQueryItem(
+    items = [
+        AdminQueryItem(
             id=r["id"],
             user_id=r["user_id"],
             user_email=r["user_email"],
@@ -610,12 +1701,15 @@ def get_admin_queries(
             dataset_name=r["dataset_name"] or "Cross-Catalog",
             generated_sql=r["generated_sql"] or "-- No SQL generated",
             execution_status=r["status"] or "SUCCESS",
-            execution_time_ms=r["execution_time_ms"] or 0,
-            rows_returned=r["result_count"] or 0,
-            credits_charged=r["credits_charged"] or 0,
+            execution_time_ms=int(r["execution_time_ms"] or 0),
+            rows_returned=int(r["result_count"] or 0),
+            credits_charged=int(r["credits_charged"] or 0),
+            credits_refunded=0,
             error_message=r["error_message"],
-            timestamp=r["created_at"]
-        ))
+            timestamp=r["created_at"],
+        )
+        for r in rows
+    ]
 
     has_more = (offset + len(items)) < total
 
@@ -625,7 +1719,7 @@ def get_admin_queries(
         admin_email=admin["email"],
         action="LIST_QUERIES",
         details=f"Listed queries page={page}, limit={limit}",
-        ip_address=client_ip
+        ip_address=client_ip,
     )
 
     return AdminQueryListResponse(
@@ -633,96 +1727,124 @@ def get_admin_queries(
         total=total,
         page=page,
         limit=limit,
-        has_more=has_more
+        has_more=has_more,
+        summary=summary,
     )
 
 
-@router.get("/transactions", response_model=AdminTransactionListResponse)
-def get_admin_transactions(
-    request: Request,
-    page: int = Query(1, ge=1, description="Page number, 1-indexed"),
-    limit: int = Query(20, ge=1, le=100, description="Items per page"),
-    search: Optional[str] = Query(None, description="Search description or user email"),
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
-    transaction_type: Optional[str] = Query(None, description="Filter by transaction type"),
-    start_date: Optional[str] = Query(None, description="Start date filter YYYY-MM-DD"),
-    end_date: Optional[str] = Query(None, description="End date filter YYYY-MM-DD"),
-    admin: dict = Depends(get_current_admin_user)
-):
+def _fetch_transactions_with_running_balance(
+    cursor,
+    user_id: Optional[str] = None,
+    search: Optional[str] = None,
+    transaction_type: Optional[str] = None,
+    direction: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
+    page: int = 1,
+    limit: int = 20,
+) -> Tuple[List[AdminTransactionItem], int, Dict[str, int]]:
     """
-    Platform-wide credit ledger and financial audit history.
+    Computes exact historical running balance (balance_after) per user via SQL window function
+    over the full credit_transactions table BEFORE filtering/pagination, so every ledger entry
+    shows the user's true balance after that transaction.
     """
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    cte_filter = "WHERE t0.user_id = ?" if user_id and user_id.strip() else ""
+    cte_params: List[Any] = [user_id.strip()] if user_id and user_id.strip() else []
 
     conditions = []
     params: List[Any] = []
 
     if search and search.strip():
         term = f"%{search.strip().lower()}%"
-        conditions.append("(LOWER(t.description) LIKE ? OR LOWER(u.email) LIKE ? OR LOWER(u.full_name) LIKE ?)")
-        params.extend([term, term, term])
-
-    if user_id and user_id.strip():
-        conditions.append("t.user_id = ?")
-        params.append(user_id.strip())
+        conditions.append("(LOWER(tx.description) LIKE ? OR LOWER(tx.user_email) LIKE ? OR LOWER(tx.user_name) LIKE ? OR LOWER(tx.id) LIKE ? OR LOWER(tx.user_id) LIKE ?)")
+        params.extend([term, term, term, term, term])
 
     if transaction_type and transaction_type.strip() and transaction_type.strip().lower() != "all":
-        conditions.append("LOWER(t.transaction_type) = ?")
+        conditions.append("LOWER(tx.transaction_type) = ?")
         params.append(transaction_type.strip().lower())
 
-    if start_date and start_date.strip():
-        conditions.append("t.created_at >= ?")
-        params.append(start_date.strip())
+    if direction and direction.strip().lower() in ("positive", "negative"):
+        if direction.strip().lower() == "positive":
+            conditions.append("tx.amount > 0")
+        else:
+            conditions.append("tx.amount < 0")
 
-    if end_date and end_date.strip():
-        ed = end_date.strip()
-        if len(ed) == 10:
-            ed = f"{ed}T23:59:59"
-        conditions.append("t.created_at <= ?")
-        params.append(ed)
+    _append_date_conditions(conditions, params, "tx.created_at", start_date, end_date)
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-    # Total count
-    count_query = f"""
-        SELECT COUNT(*) AS total
-        FROM credit_transactions t
-        JOIN users u ON t.user_id = u.id
-        {where_clause}
+    base_cte = f"""
+        WITH ranked_tx AS (
+            SELECT t0.id, t0.user_id, t0.amount, t0.transaction_type, t0.description, t0.status, t0.created_at,
+                   u.email AS user_email, u.full_name AS user_name,
+                   SUM(t0.amount) OVER (
+                       PARTITION BY t0.user_id
+                       ORDER BY {_norm_ts_sql('t0.created_at')} ASC, t0.rowid ASC
+                   ) AS balance_after
+            FROM credit_transactions t0
+            JOIN users u ON t0.user_id = u.id
+            {cte_filter}
+        )
     """
-    cursor.execute(count_query, params)
-    total = cursor.fetchone()["total"] or 0
 
+    owner_types_sql = ",".join(f"'{t}'" for t in OWNER_EARNING_TYPES)
+    cursor.execute(
+        f"""
+        {base_cte}
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN tx.amount > 0 THEN tx.amount ELSE 0 END), 0) AS issued,
+               COALESCE(ABS(SUM(CASE WHEN tx.amount < 0 THEN tx.amount ELSE 0 END)), 0) AS spent,
+               COALESCE(SUM(CASE WHEN LOWER(tx.transaction_type) IN ({owner_types_sql}) AND tx.amount > 0 THEN tx.amount ELSE 0 END), 0) AS owner_earned,
+               COALESCE(ABS(SUM(CASE WHEN LOWER(tx.transaction_type) = 'query_fee' THEN tx.amount ELSE 0 END)), 0) AS query_fees,
+               COALESCE(SUM(CASE WHEN LOWER(tx.transaction_type) LIKE '%refund%' AND tx.amount > 0 THEN tx.amount ELSE 0 END), 0) AS refunds
+        FROM ranked_tx tx
+        {where_clause}
+        """,
+        cte_params + params,
+    )
+    agg = cursor.fetchone()
+    total = int(agg["total"] or 0)
+    issued = int(agg["issued"] or 0)
+    spent = int(agg["spent"] or 0)
+    summary = {
+        "total_issued": issued,
+        "total_spent": spent,
+        "net_movement": issued - spent,
+        "earned_by_owners": int(agg["owner_earned"] or 0),
+        "query_fees_collected": int(agg["query_fees"] or 0),
+        "refunds_total": int(agg["refunds"] or 0),
+    }
+
+    order = "ASC" if (sort_order or "desc").lower() == "asc" else "DESC"
     offset = (page - 1) * limit
-    data_query = f"""
-        SELECT t.id, t.user_id, t.amount, t.transaction_type, t.description, t.status, t.created_at,
-               u.email AS user_email, u.full_name AS user_name
-        FROM credit_transactions t
-        JOIN users u ON t.user_id = u.id
+    cursor.execute(
+        f"""
+        {base_cte}
+        SELECT tx.id, tx.user_id, tx.user_email, tx.user_name, tx.amount,
+               tx.transaction_type, tx.description, tx.status, tx.created_at, tx.balance_after
+        FROM ranked_tx tx
         {where_clause}
-        ORDER BY t.created_at DESC, t.id DESC
+        ORDER BY {_norm_ts_sql('tx.created_at')} {order}, tx.id {order}
         LIMIT ? OFFSET ?
-    """
-    data_params = list(params) + [limit, offset]
-    cursor.execute(data_query, data_params)
+        """,
+        cte_params + params + [limit, offset],
+    )
     rows = cursor.fetchall()
 
-    items = []
+    # Batch resolve dataset names referenced in transaction descriptions
+    ds_ids: Set[str] = set()
+    parsed_refs: List[Tuple[Optional[str], Optional[str], Optional[str]]] = []
     for r in rows:
-        amount = r["amount"]
-        impact = f"+{amount}" if amount > 0 else f"{amount}"
-        
-        # Infer associated resource from description when available
-        desc = r["description"] or ""
-        assoc = None
-        if "dataset" in desc.lower():
-            assoc = "Dataset Asset"
-        elif "query" in desc.lower():
-            assoc = "Query Engine"
-        elif "redeem" in desc.lower():
-            assoc = "Payout Destination"
+        assoc, ds_id, q_id = _extract_resource_ids(r["description"] or "")
+        parsed_refs.append((assoc, ds_id, q_id))
+        if ds_id:
+            ds_ids.add(ds_id)
+    ds_name_map = _batch_dataset_names(cursor, ds_ids)
 
+    items = []
+    for r, (assoc, ds_id, q_id) in zip(rows, parsed_refs):
+        amount = int(r["amount"] or 0)
+        impact = f"+{amount}" if amount > 0 else f"{amount}"
         items.append(AdminTransactionItem(
             id=r["id"],
             user_id=r["user_id"],
@@ -731,12 +1853,53 @@ def get_admin_transactions(
             transaction_type=r["transaction_type"],
             amount=amount,
             balance_impact=impact,
+            balance_after=int(r["balance_after"]) if r["balance_after"] is not None else None,
             associated_resource=assoc,
-            description=desc,
+            related_dataset_id=ds_id,
+            related_dataset_name=ds_name_map.get(ds_id) if ds_id else None,
+            related_query_id=q_id,
+            description=r["description"] or "",
             status=r["status"] or "completed",
-            timestamp=r["created_at"]
+            timestamp=r["created_at"],
         ))
 
+    return items, total, summary
+
+
+@router.get("/transactions", response_model=AdminTransactionListResponse)
+def get_admin_transactions(
+    request: Request,
+    page: int = Query(1, ge=1, description="Page number, 1-indexed"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    search: Optional[str] = Query(None, description="Search description, user name, email, or ID"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    transaction_type: Optional[str] = Query(None, description="Filter by transaction type"),
+    direction: Optional[str] = Query(None, description="Filter by credit direction: all, positive, negative"),
+    start_date: Optional[str] = Query(None, description="Start date filter YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date filter YYYY-MM-DD"),
+    sort_order: Optional[str] = Query("desc", description="Sort order: desc, asc"),
+    admin: dict = Depends(get_current_admin_user),
+):
+    """
+    Platform-wide credit ledger and financial audit history with running balances and summary totals.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    items, total, summary = _fetch_transactions_with_running_balance(
+        cursor=cursor,
+        user_id=user_id,
+        search=search,
+        transaction_type=transaction_type,
+        direction=direction,
+        start_date=start_date,
+        end_date=end_date,
+        sort_order=sort_order,
+        page=page,
+        limit=limit,
+    )
+
+    offset = (page - 1) * limit
     has_more = (offset + len(items)) < total
 
     client_ip = request.client.host if request.client else None
@@ -745,7 +1908,7 @@ def get_admin_transactions(
         admin_email=admin["email"],
         action="LIST_TRANSACTIONS",
         details=f"Listed credit transactions page={page}, limit={limit}",
-        ip_address=client_ip
+        ip_address=client_ip,
     )
 
     return AdminTransactionListResponse(
@@ -753,7 +1916,8 @@ def get_admin_transactions(
         total=total,
         page=page,
         limit=limit,
-        has_more=has_more
+        has_more=has_more,
+        summary=summary,
     )
 
 
@@ -762,7 +1926,8 @@ def get_admin_audit_logs(
     page: int = Query(1, ge=1, description="Page number, 1-indexed"),
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
     action: Optional[str] = Query(None, description="Filter by action name"),
-    admin: dict = Depends(get_current_admin_user)
+    search: Optional[str] = Query(None, description="Search details, target resource, or admin email"),
+    admin: dict = Depends(get_current_admin_user),
 ):
     """
     Returns administrative access and governance audit logs.
@@ -777,20 +1942,27 @@ def get_admin_audit_logs(
         conditions.append("UPPER(action) = ?")
         params.append(action.strip().upper())
 
+    if search and search.strip():
+        term = f"%{search.strip().lower()}%"
+        conditions.append("(LOWER(COALESCE(details, '')) LIKE ? OR LOWER(COALESCE(target_resource, '')) LIKE ? OR LOWER(admin_email) LIKE ? OR LOWER(action) LIKE ?)")
+        params.extend([term, term, term, term])
+
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     cursor.execute(f"SELECT COUNT(*) AS total FROM admin_audit_logs {where_clause}", params)
-    total = cursor.fetchone()["total"] or 0
+    total = int(cursor.fetchone()["total"] or 0)
 
     offset = (page - 1) * limit
-    data_query = f"""
+    cursor.execute(
+        f"""
         SELECT id, admin_user_id, admin_email, action, target_resource, details, ip_address, created_at
         FROM admin_audit_logs
         {where_clause}
-        ORDER BY created_at DESC, id DESC
+        ORDER BY {_norm_ts_sql('created_at')} DESC, id DESC
         LIMIT ? OFFSET ?
-    """
-    cursor.execute(data_query, list(params) + [limit, offset])
+        """,
+        list(params) + [limit, offset],
+    )
     rows = cursor.fetchall()
 
     items = [
@@ -802,8 +1974,9 @@ def get_admin_audit_logs(
             target_resource=r["target_resource"],
             details=r["details"],
             ip_address=r["ip_address"],
-            timestamp=r["created_at"]
-        ) for r in rows
+            timestamp=r["created_at"],
+        )
+        for r in rows
     ]
 
     return AdminAuditLogListResponse(
@@ -811,5 +1984,744 @@ def get_admin_audit_logs(
         total=total,
         page=page,
         limit=limit,
-        has_more=(offset + len(items)) < total
+        has_more=(offset + len(items)) < total,
+    )
+
+
+def _get_timeline_events(
+    cursor,
+    user_id: Optional[str] = None,
+    activity_type: Optional[str] = None,
+    dataset_id: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
+    include_admin_audit: bool = False,
+    limit: int = 20,
+    offset: int = 0,
+):
+    """
+    Unified chronological event stream across all persisted platform tables.
+    - Uses normalized ISO timestamps (REPLACE(' ', 'T')) for deterministic ordering & date filtering.
+    - Includes USER_LOGIN derived from persisted session rows WITHOUT ever exposing session credentials.
+    - Excludes noisy read-only ADMIN_AUDIT events unless explicitly requested via activity_type='ADMIN_AUDIT'.
+    """
+    norm_u = _norm_ts_sql("u.created_at")
+    norm_tok = _norm_ts_sql("s.created_at")
+    norm_d = _norm_ts_sql("d.created_at")
+    norm_q = _norm_ts_sql("q.created_at")
+    norm_t = _norm_ts_sql("t.created_at")
+    norm_v = _norm_ts_sql("v.created_at")
+    norm_du = _norm_ts_sql("du.created_at")
+    norm_a = _norm_ts_sql("a.created_at")
+
+    want_audit = include_admin_audit or (activity_type and activity_type.strip().upper() == "ADMIN_AUDIT")
+
+    union_parts = [
+        f"""
+        SELECT 'reg_' || u.id AS id,
+               'USER_REGISTER' AS type,
+               'Account Registered' AS title,
+               'User ' || u.full_name || ' registered on DataPulse' AS description,
+               {norm_u} AS timestamp,
+               'SUCCESS' AS status,
+               u.id AS user_id,
+               u.email AS user_email,
+               u.full_name AS user_name,
+               NULL AS dataset_id,
+               NULL AS dataset_name,
+               NULL AS related_query_id,
+               NULL AS related_transaction_id,
+               '100' AS detail_1,
+               CASE WHEN u.is_admin = 1 THEN 'Administrator' ELSE 'Contributor' END AS detail_2,
+               NULL AS detail_3
+        FROM users u
+        """,
+        f"""
+        SELECT 'login_' || CAST(s.rowid AS TEXT) AS id,
+               'USER_LOGIN' AS type,
+               'Account Sign-In' AS title,
+               'Authenticated session started for ' || u.full_name AS description,
+               {norm_tok} AS timestamp,
+               'SUCCESS' AS status,
+               s.user_id AS user_id,
+               u.email AS user_email,
+               u.full_name AS user_name,
+               NULL AS dataset_id,
+               NULL AS dataset_name,
+               NULL AS related_query_id,
+               NULL AS related_transaction_id,
+               'session_record' AS detail_1,
+               NULL AS detail_2,
+               NULL AS detail_3
+        FROM tokens s
+        JOIN users u ON s.user_id = u.id
+        WHERE SUBSTR({norm_tok}, 1, 19) != SUBSTR({norm_u}, 1, 19)
+        """,
+        f"""
+        SELECT 'ds_' || d.id AS id,
+               'DATASET_UPLOAD' AS type,
+               'Dataset Uploaded' AS title,
+               d.name || ' (' || d.rows_count || ' rows, ' || d.columns_count || ' cols)' AS description,
+               {norm_d} AS timestamp,
+               'SUCCESS' AS status,
+               d.user_id AS user_id,
+               u.email AS user_email,
+               u.full_name AS user_name,
+               d.id AS dataset_id,
+               d.name AS dataset_name,
+               NULL AS related_query_id,
+               NULL AS related_transaction_id,
+               CAST(d.rows_count AS TEXT) AS detail_1,
+               d.filename AS detail_2,
+               d.domain AS detail_3
+        FROM datasets d
+        JOIN users u ON d.user_id = u.id
+        """,
+        f"""
+        SELECT 'qry_' || q.id AS id,
+               'QUERY_EXECUTION' AS type,
+               CASE WHEN UPPER(COALESCE(q.status, 'SUCCESS')) = 'SUCCESS' THEN 'Query Executed' ELSE 'Query Failed' END AS title,
+               q.query_text AS description,
+               {norm_q} AS timestamp,
+               COALESCE(q.status, 'SUCCESS') AS status,
+               q.user_id AS user_id,
+               u.email AS user_email,
+               u.full_name AS user_name,
+               q.dataset_id AS dataset_id,
+               COALESCE(q.dataset_name, 'Cross-Catalog') AS dataset_name,
+               q.id AS related_query_id,
+               NULL AS related_transaction_id,
+               CAST(COALESCE(q.credits_charged, 0) AS TEXT) AS detail_1,
+               COALESCE(q.generated_sql, '') AS detail_2,
+               COALESCE(q.error_message, CAST(COALESCE(q.execution_time_ms, 0) AS TEXT) || 'ms • ' || CAST(COALESCE(q.result_count, 0) AS TEXT) || ' rows') AS detail_3
+        FROM queries q
+        JOIN users u ON q.user_id = u.id
+        """,
+        f"""
+        SELECT 'tx_' || t.id AS id,
+               'CREDIT_TRANSACTION' AS type,
+               CASE
+                   WHEN LOWER(t.transaction_type) LIKE '%refund%' THEN 'Credit Refund'
+                   WHEN LOWER(t.transaction_type) = 'query_fee' THEN 'Query Fee Charged'
+                   WHEN LOWER(t.transaction_type) = 'redeem' THEN 'Credit Redemption'
+                   WHEN t.amount > 0 THEN 'Credit Reward'
+                   ELSE 'Credit Debit'
+               END AS title,
+               t.description AS description,
+               {norm_t} AS timestamp,
+               COALESCE(t.status, 'completed') AS status,
+               t.user_id AS user_id,
+               u.email AS user_email,
+               u.full_name AS user_name,
+               NULL AS dataset_id,
+               NULL AS dataset_name,
+               NULL AS related_query_id,
+               t.id AS related_transaction_id,
+               CAST(t.amount AS TEXT) AS detail_1,
+               t.transaction_type AS detail_2,
+               NULL AS detail_3
+        FROM credit_transactions t
+        JOIN users u ON t.user_id = u.id
+        """,
+        f"""
+        SELECT 'ver_' || v.id AS id,
+               'DATASET_IMPROVE' AS type,
+               'Dataset Version Improved' AS title,
+               v.changes_summary AS description,
+               {norm_v} AS timestamp,
+               'SUCCESS' AS status,
+               v.user_id AS user_id,
+               u.email AS user_email,
+               u.full_name AS user_name,
+               v.dataset_id AS dataset_id,
+               d.name AS dataset_name,
+               NULL AS related_query_id,
+               NULL AS related_transaction_id,
+               '+' || CAST(v.credits_awarded AS TEXT) || ' cr' AS detail_1,
+               v.version AS detail_2,
+               '+' || CAST(ROUND(v.delta_score, 1) AS TEXT) AS detail_3
+        FROM dataset_versions v
+        JOIN users u ON v.user_id = u.id
+        LEFT JOIN datasets d ON v.dataset_id = d.id
+        """,
+        f"""
+        SELECT 'unl_' || du.id AS id,
+               'DATASET_UNLOCK' AS type,
+               'Dataset Unlocked' AS title,
+               'Unlocked dataset ' || COALESCE(d.name, du.dataset_id) AS description,
+               {norm_du} AS timestamp,
+               'SUCCESS' AS status,
+               du.user_id AS user_id,
+               u.email AS user_email,
+               u.full_name AS user_name,
+               du.dataset_id AS dataset_id,
+               d.name AS dataset_name,
+               NULL AS related_query_id,
+               NULL AS related_transaction_id,
+               '-' || CAST(du.unlock_price AS TEXT) || ' cr' AS detail_1,
+               NULL AS detail_2,
+               NULL AS detail_3
+        FROM dataset_unlocks du
+        JOIN users u ON du.user_id = u.id
+        LEFT JOIN datasets d ON du.dataset_id = d.id
+        """,
+    ]
+
+    if want_audit:
+        union_parts.append(f"""
+        SELECT 'aud_' || a.id AS id,
+               'ADMIN_AUDIT' AS type,
+               'Admin Inspection' AS title,
+               a.action || ': ' || COALESCE(a.details, 'Administrative audit') AS description,
+               {norm_a} AS timestamp,
+               'SUCCESS' AS status,
+               a.admin_user_id AS user_id,
+               a.admin_email AS user_email,
+               'Administrator' AS user_name,
+               NULL AS dataset_id,
+               NULL AS dataset_name,
+               NULL AS related_query_id,
+               NULL AS related_transaction_id,
+               a.action AS detail_1,
+               a.target_resource AS detail_2,
+               a.ip_address AS detail_3
+        FROM admin_audit_logs a
+        """)
+
+    base_union = "\nUNION ALL\n".join(union_parts)
+
+    conditions = []
+    params: List[Any] = []
+
+    if user_id and user_id.strip():
+        uid = user_id.strip()
+        if want_audit:
+            conditions.append("(events.user_id = ? OR (events.type = 'ADMIN_AUDIT' AND events.detail_2 = ?))")
+            params.extend([uid, uid])
+        else:
+            conditions.append("events.user_id = ?")
+            params.append(uid)
+
+    if activity_type and activity_type.strip() and activity_type.strip().lower() != "all":
+        at = activity_type.strip().upper()
+        if at == "QUERY_SUCCESS":
+            conditions.append("(events.type = 'QUERY_EXECUTION' AND UPPER(events.status) = 'SUCCESS')")
+        elif at == "QUERY_FAILED":
+            conditions.append("(events.type = 'QUERY_EXECUTION' AND UPPER(events.status) != 'SUCCESS')")
+        elif at == "CREDIT_REWARD":
+            conditions.append("(events.type = 'CREDIT_TRANSACTION' AND CAST(events.detail_1 AS INTEGER) > 0 AND LOWER(COALESCE(events.detail_2, '')) NOT LIKE '%refund%')")
+        elif at == "QUERY_FEE":
+            conditions.append("(events.type = 'CREDIT_TRANSACTION' AND LOWER(COALESCE(events.detail_2, '')) = 'query_fee')")
+        elif at == "REFUND":
+            conditions.append("(events.type = 'CREDIT_TRANSACTION' AND LOWER(COALESCE(events.detail_2, '')) LIKE '%refund%')")
+        else:
+            conditions.append("UPPER(events.type) = ?")
+            params.append(at)
+
+    if dataset_id and dataset_id.strip():
+        conditions.append("events.dataset_id = ?")
+        params.append(dataset_id.strip())
+
+    if status_filter and status_filter.strip() and status_filter.strip().lower() != "all":
+        sf = status_filter.strip().upper()
+        if sf == "FAILED":
+            conditions.append("UPPER(events.status) NOT IN ('SUCCESS', 'COMPLETED')")
+        else:
+            conditions.append("UPPER(events.status) = ?")
+            params.append(sf)
+
+    _append_date_conditions(conditions, params, "events.timestamp", start_date, end_date)
+
+    if search and search.strip():
+        term = f"%{search.strip().lower()}%"
+        conditions.append("(LOWER(events.title) LIKE ? OR LOWER(events.description) LIKE ? OR LOWER(COALESCE(events.user_email, '')) LIKE ? OR LOWER(COALESCE(events.user_name, '')) LIKE ? OR LOWER(COALESCE(events.user_id, '')) LIKE ? OR LOWER(COALESCE(events.dataset_name, '')) LIKE ? OR LOWER(COALESCE(events.dataset_id, '')) LIKE ?)")
+        params.extend([term, term, term, term, term, term, term])
+
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    order = "ASC" if (sort_order or "desc").lower() == "asc" else "DESC"
+
+    cursor.execute(f"SELECT COUNT(*) AS total FROM ({base_union}) events {where_sql}", params)
+    total = int(cursor.fetchone()["total"] or 0)
+
+    cursor.execute(
+        f"""
+        SELECT id, type, title, description, timestamp, status, user_id, user_email, user_name,
+               dataset_id, dataset_name, related_query_id, related_transaction_id,
+               detail_1, detail_2, detail_3
+        FROM ({base_union}) events
+        {where_sql}
+        ORDER BY timestamp {order}, id {order}
+        LIMIT ? OFFSET ?
+        """,
+        list(params) + [limit, offset],
+    )
+    rows = cursor.fetchall()
+
+    items = []
+    for r in rows:
+        t = r["type"]
+        meta: Dict[str, Any] = {}
+        ds_id = r["dataset_id"]
+        rel_q_id = r["related_query_id"]
+        rel_tx_id = r["related_transaction_id"]
+
+        if t == "USER_REGISTER":
+            meta = {"initial_credits": 100, "role": r["detail_2"]}
+        elif t == "USER_LOGIN":
+            meta = {"source": r["detail_1"]}
+        elif t == "DATASET_UPLOAD":
+            meta = {"rows_count": r["detail_1"], "filename": r["detail_2"], "domain": r["detail_3"]}
+        elif t == "QUERY_EXECUTION":
+            meta = {
+                "credits_charged": r["detail_1"],
+                "generated_sql": r["detail_2"],
+                "execution_info": r["detail_3"],
+            }
+            if (r["status"] or "").upper() != "SUCCESS":
+                meta["error_message"] = r["detail_3"]
+        elif t == "CREDIT_TRANSACTION":
+            _, parsed_ds, parsed_q = _extract_resource_ids(r["description"] or "")
+            if not ds_id and parsed_ds:
+                ds_id = parsed_ds
+            if not rel_q_id and parsed_q:
+                rel_q_id = parsed_q
+            meta = {"amount": r["detail_1"], "transaction_type": r["detail_2"]}
+        elif t == "DATASET_IMPROVE":
+            meta = {"credits_awarded": r["detail_1"], "version": r["detail_2"], "delta_score": r["detail_3"]}
+        elif t == "DATASET_UNLOCK":
+            meta = {"unlock_price": r["detail_1"]}
+        elif t == "ADMIN_AUDIT":
+            meta = {"action": r["detail_1"], "target_resource": r["detail_2"], "ip_address": r["detail_3"]}
+
+        items.append(AdminTimelineItem(
+            id=r["id"],
+            type=t,
+            title=r["title"],
+            description=r["description"],
+            timestamp=r["timestamp"],
+            status=r["status"] or "SUCCESS",
+            user_id=r["user_id"],
+            user_email=r["user_email"],
+            user_name=r["user_name"],
+            dataset_id=ds_id,
+            dataset_name=r["dataset_name"],
+            related_query_id=rel_q_id,
+            related_transaction_id=rel_tx_id,
+            metadata=meta,
+        ))
+
+    return items, total
+
+
+@router.get("/users/{user_id}/queries", response_model=AdminQueryListResponse)
+def get_admin_user_queries(
+    user_id: str,
+    request: Request,
+    page: int = Query(1, ge=1, description="Page number, 1-indexed"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    search: Optional[str] = Query(None, description="Search prompt, SQL, or dataset name"),
+    dataset_id: Optional[str] = Query(None, description="Filter by dataset ID"),
+    status: Optional[str] = Query(None, description="Filter by status (SUCCESS, FAILED, SQL_REJECTED, INSUFFICIENT_CREDITS)"),
+    start_date: Optional[str] = Query(None, description="Start date filter YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date filter YYYY-MM-DD"),
+    sort_order: Optional[str] = Query("desc", description="Sort order: desc, asc"),
+    admin: dict = Depends(get_current_admin_user),
+):
+    """
+    Dedicated, server-side paginated query history belonging to a specific user.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, email, full_name FROM users WHERE id = ?", (user_id,))
+    u_row = cursor.fetchone()
+    if not u_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID '{user_id}' not found.",
+        )
+
+    conditions = ["q.user_id = ?"]
+    params: List[Any] = [user_id]
+
+    if search and search.strip():
+        term = f"%{search.strip().lower()}%"
+        conditions.append("(LOWER(q.query_text) LIKE ? OR LOWER(COALESCE(q.generated_sql, '')) LIKE ? OR LOWER(COALESCE(q.dataset_name, '')) LIKE ?)")
+        params.extend([term, term, term])
+
+    if dataset_id and dataset_id.strip():
+        conditions.append("q.dataset_id = ?")
+        params.append(dataset_id.strip())
+
+    if status and status.strip() and status.strip().upper() != "ALL":
+        st = status.strip().upper()
+        if st == "FAILED":
+            conditions.append("UPPER(COALESCE(q.status, 'SUCCESS')) != 'SUCCESS'")
+        else:
+            conditions.append("UPPER(COALESCE(q.status, 'SUCCESS')) = ?")
+            params.append(st)
+
+    _append_date_conditions(conditions, params, "q.created_at", start_date, end_date)
+
+    where_clause = f"WHERE {' AND '.join(conditions)}"
+
+    cursor.execute(f"SELECT COUNT(*) AS total FROM queries q {where_clause}", params)
+    total = int(cursor.fetchone()["total"] or 0)
+
+    order = "ASC" if (sort_order or "desc").lower() == "asc" else "DESC"
+    offset = (page - 1) * limit
+    cursor.execute(
+        f"""
+        SELECT q.id, q.user_id, q.dataset_id, q.dataset_name, q.query_text, q.generated_sql,
+               q.execution_time_ms, q.result_count, q.status, q.credits_charged, q.error_message, q.created_at,
+               u.email AS user_email, u.full_name AS user_name
+        FROM queries q
+        JOIN users u ON q.user_id = u.id
+        {where_clause}
+        ORDER BY {_norm_ts_sql('q.created_at')} {order}, q.id {order}
+        LIMIT ? OFFSET ?
+        """,
+        list(params) + [limit, offset],
+    )
+    rows = cursor.fetchall()
+
+    items = [
+        AdminQueryItem(
+            id=r["id"],
+            user_id=r["user_id"],
+            user_email=r["user_email"],
+            user_name=r["user_name"],
+            natural_prompt=r["query_text"],
+            dataset_id=r["dataset_id"],
+            dataset_name=r["dataset_name"] or "Cross-Catalog",
+            generated_sql=r["generated_sql"] or "-- No SQL generated",
+            execution_status=r["status"] or "SUCCESS",
+            execution_time_ms=int(r["execution_time_ms"] or 0),
+            rows_returned=int(r["result_count"] or 0),
+            credits_charged=int(r["credits_charged"] or 0),
+            credits_refunded=0,
+            error_message=r["error_message"],
+            timestamp=r["created_at"],
+        )
+        for r in rows
+    ]
+
+    client_ip = request.client.host if request.client else None
+    log_admin_audit(
+        admin_user_id=admin["id"],
+        admin_email=admin["email"],
+        action="VIEW_USER_QUERIES",
+        target_resource=user_id,
+        details=f"Viewed queries for user {u_row['email']}, page={page}",
+        ip_address=client_ip,
+    )
+
+    return AdminQueryListResponse(
+        items=items,
+        total=total,
+        page=page,
+        limit=limit,
+        has_more=(offset + len(items)) < total,
+    )
+
+
+@router.get("/users/{user_id}/datasets", response_model=AdminDatasetListResponse)
+def get_admin_user_datasets(
+    user_id: str,
+    request: Request,
+    page: int = Query(1, ge=1, description="Page number, 1-indexed"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    search: Optional[str] = Query(None, description="Search title, filename, domain"),
+    domain: Optional[str] = Query(None, description="Filter by domain"),
+    admin: dict = Depends(get_current_admin_user),
+):
+    """
+    Dedicated, server-side paginated dataset uploads belonging to a specific user.
+    Includes per-dataset reward breakdowns (basic, quality, improvement), versions, query usage, and DuckDB availability.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, email, full_name FROM users WHERE id = ?", (user_id,))
+    u_row = cursor.fetchone()
+    if not u_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID '{user_id}' not found.",
+        )
+
+    conditions = ["d.user_id = ?"]
+    params: List[Any] = [user_id]
+
+    if search and search.strip():
+        term = f"%{search.strip().lower()}%"
+        conditions.append("(LOWER(d.name) LIKE ? OR LOWER(d.filename) LIKE ? OR LOWER(d.domain) LIKE ?)")
+        params.extend([term, term, term])
+
+    if domain and domain.strip() and domain.strip().lower() != "all":
+        conditions.append("LOWER(d.domain) = ?")
+        params.append(domain.strip().lower())
+
+    where_clause = f"WHERE {' AND '.join(conditions)}"
+
+    cursor.execute(f"SELECT COUNT(*) AS total FROM datasets d {where_clause}", params)
+    total = int(cursor.fetchone()["total"] or 0)
+
+    offset = (page - 1) * limit
+    cursor.execute(
+        f"""
+        SELECT d.id, d.name, d.filename, d.domain, d.rows_count, d.columns_count,
+               d.content_summary, d.unlock_price, d.created_at,
+               u.id AS owner_id, u.full_name AS owner_name, u.email AS owner_email,
+               e.quality_score, e.domain_relevance_score, e.overall_score,
+               e.status AS evaluation_status, e.credits_awarded,
+               (SELECT COUNT(*) FROM dataset_unlocks du WHERE du.dataset_id = d.id) AS unlock_count
+        FROM datasets d
+        JOIN users u ON d.user_id = u.id
+        LEFT JOIN evaluations e ON d.id = e.dataset_id
+        {where_clause}
+        ORDER BY {_norm_ts_sql('d.created_at')} DESC, d.id DESC
+        LIMIT ? OFFSET ?
+        """,
+        list(params) + [limit, offset],
+    )
+    rows = cursor.fetchall()
+
+    ds_ids = [r["id"] for r in rows]
+    rewards_map, versions_map, query_counts_map = _batch_dataset_rewards_and_versions(cursor, ds_ids)
+    existing_duckdb_ids = get_existing_dataset_ids()
+
+    items = []
+    for r in rows:
+        ds_id = r["id"]
+        rew = rewards_map.get(ds_id, {"basic": 0, "quality": 0, "improvement": 0})
+        vers = versions_map.get(ds_id, [])
+        avail = "Available" if ds_id in existing_duckdb_ids else "Metadata Only"
+        items.append(AdminDatasetItem(
+            id=ds_id,
+            title=r["name"],
+            name=r["name"],
+            filename=r["filename"],
+            owner_id=r["owner_id"],
+            owner_name=r["owner_name"],
+            owner_email=r["owner_email"],
+            domain=r["domain"],
+            rows_count=r["rows_count"],
+            columns_count=r["columns_count"],
+            quality_score=round(float(r["quality_score"]), 1) if r["quality_score"] is not None else None,
+            domain_relevance_score=round(float(r["domain_relevance_score"]), 1) if r["domain_relevance_score"] is not None else None,
+            overall_score=round(float(r["overall_score"]), 1) if r["overall_score"] is not None else None,
+            evaluation_status=r["evaluation_status"] or "pending",
+            credits_awarded=r["credits_awarded"],
+            basic_upload_reward=rew["basic"],
+            quality_reward=rew["quality"],
+            improvement_rewards=rew["improvement"],
+            unlock_price=r["unlock_price"] or 10,
+            unlock_count=int(r["unlock_count"] or 0),
+            query_count=query_counts_map.get(ds_id, 0),
+            version_count=len(vers) + 1,
+            versions=vers,
+            availability=avail,
+            content_summary=r["content_summary"] or "",
+            created_at=r["created_at"],
+        ))
+
+    client_ip = request.client.host if request.client else None
+    log_admin_audit(
+        admin_user_id=admin["id"],
+        admin_email=admin["email"],
+        action="VIEW_USER_DATASETS",
+        target_resource=user_id,
+        details=f"Viewed datasets for user {u_row['email']}, page={page}",
+        ip_address=client_ip,
+    )
+
+    return AdminDatasetListResponse(
+        items=items,
+        total=total,
+        page=page,
+        limit=limit,
+        has_more=(offset + len(items)) < total,
+    )
+
+
+@router.get("/users/{user_id}/transactions", response_model=AdminTransactionListResponse)
+def get_admin_user_transactions(
+    user_id: str,
+    request: Request,
+    page: int = Query(1, ge=1, description="Page number, 1-indexed"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    search: Optional[str] = Query(None, description="Search description"),
+    transaction_type: Optional[str] = Query(None, description="Filter by transaction type"),
+    direction: Optional[str] = Query(None, description="Filter by direction: all, positive, negative"),
+    start_date: Optional[str] = Query(None, description="Start date filter YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date filter YYYY-MM-DD"),
+    sort_order: Optional[str] = Query("desc", description="Sort order: desc, asc"),
+    admin: dict = Depends(get_current_admin_user),
+):
+    """
+    Dedicated, server-side paginated credit ledger belonging to a specific user
+    with historical running balances.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, email, full_name FROM users WHERE id = ?", (user_id,))
+    u_row = cursor.fetchone()
+    if not u_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID '{user_id}' not found.",
+        )
+
+    items, total, summary = _fetch_transactions_with_running_balance(
+        cursor=cursor,
+        user_id=user_id,
+        search=search,
+        transaction_type=transaction_type,
+        direction=direction,
+        start_date=start_date,
+        end_date=end_date,
+        sort_order=sort_order,
+        page=page,
+        limit=limit,
+    )
+
+    offset = (page - 1) * limit
+    client_ip = request.client.host if request.client else None
+    log_admin_audit(
+        admin_user_id=admin["id"],
+        admin_email=admin["email"],
+        action="VIEW_USER_TRANSACTIONS",
+        target_resource=user_id,
+        details=f"Viewed transactions for user {u_row['email']}, page={page}",
+        ip_address=client_ip,
+    )
+
+    return AdminTransactionListResponse(
+        items=items,
+        total=total,
+        page=page,
+        limit=limit,
+        has_more=(offset + len(items)) < total,
+        summary=summary,
+    )
+
+
+@router.get("/users/{user_id}/activity", response_model=AdminTimelineResponse)
+def get_admin_user_activity(
+    user_id: str,
+    request: Request,
+    page: int = Query(1, ge=1, description="Page number, 1-indexed"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    activity_type: Optional[str] = Query(None, description="Filter by activity type"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    start_date: Optional[str] = Query(None, description="Start date filter YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date filter YYYY-MM-DD"),
+    sort_order: Optional[str] = Query("desc", description="Sort order: desc, asc"),
+    admin: dict = Depends(get_current_admin_user),
+):
+    """
+    Chronological activity timeline consolidating registration, sign-ins, uploads, queries,
+    credit transactions, improvements, and unlocks for a single user.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, email, full_name FROM users WHERE id = ?", (user_id,))
+    u_row = cursor.fetchone()
+    if not u_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID '{user_id}' not found.",
+        )
+
+    offset = (page - 1) * limit
+    items, total = _get_timeline_events(
+        cursor=cursor,
+        user_id=user_id,
+        activity_type=activity_type,
+        status_filter=status,
+        start_date=start_date,
+        end_date=end_date,
+        sort_order=sort_order,
+        include_admin_audit=False,
+        limit=limit,
+        offset=offset,
+    )
+
+    client_ip = request.client.host if request.client else None
+    log_admin_audit(
+        admin_user_id=admin["id"],
+        admin_email=admin["email"],
+        action="VIEW_USER_TIMELINE",
+        target_resource=user_id,
+        details=f"Viewed activity timeline for user {u_row['email']}, page={page}",
+        ip_address=client_ip,
+    )
+
+    return AdminTimelineResponse(
+        items=items,
+        total=total,
+        page=page,
+        limit=limit,
+        has_more=(offset + len(items)) < total,
+    )
+
+
+@router.get("/activity", response_model=AdminTimelineResponse)
+def get_admin_global_activity(
+    request: Request,
+    page: int = Query(1, ge=1, description="Page number, 1-indexed"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    search: Optional[str] = Query(None, description="Search user, email, dataset, prompt, or description"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    activity_type: Optional[str] = Query(None, description="Filter by activity type"),
+    dataset_id: Optional[str] = Query(None, description="Filter by dataset ID"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    start_date: Optional[str] = Query(None, description="Start date filter YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date filter YYYY-MM-DD"),
+    sort_order: Optional[str] = Query("desc", description="Sort order: desc, asc"),
+    admin: dict = Depends(get_current_admin_user),
+):
+    """
+    Global platform activity explorer across all users with multi-dimensional filtering and sorting.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    offset = (page - 1) * limit
+    items, total = _get_timeline_events(
+        cursor=cursor,
+        user_id=user_id,
+        activity_type=activity_type,
+        dataset_id=dataset_id,
+        status_filter=status,
+        start_date=start_date,
+        end_date=end_date,
+        search=search,
+        sort_order=sort_order,
+        include_admin_audit=False,
+        limit=limit,
+        offset=offset,
+    )
+
+    client_ip = request.client.host if request.client else None
+    log_admin_audit(
+        admin_user_id=admin["id"],
+        admin_email=admin["email"],
+        action="VIEW_GLOBAL_ACTIVITY",
+        details=f"Viewed global activity explorer page={page}, limit={limit}",
+        ip_address=client_ip,
+    )
+
+    return AdminTimelineResponse(
+        items=items,
+        total=total,
+        page=page,
+        limit=limit,
+        has_more=(offset + len(items)) < total,
     )

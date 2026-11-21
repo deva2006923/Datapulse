@@ -238,6 +238,24 @@ def dataset_table_exists(dataset_id: str) -> bool:
         return bool(res and res[0] > 0)
 
 
+def get_existing_dataset_ids() -> set:
+    """
+    Batch-check all dataset IDs currently present as analytical tables in DuckDB.
+    Executes a single metadata query to avoid N+1 storage checks in admin listings.
+    """
+    try:
+        with _duckdb_lock:
+            conn = _get_raw_connection()
+            rows = conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'dataset_%'"
+            ).fetchall()
+            prefix = "dataset_"
+            return {str(r[0])[len(prefix):] for r in rows if r and r[0] and str(r[0]).startswith(prefix)}
+    except Exception as e:
+        logger.warning("Failed to inspect DuckDB dataset tables: %s", e)
+        return set()
+
+
 def get_dataset_rows(dataset_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     """Safe parameterized query to fetch rows from a dataset table."""
     table_name = get_dataset_table_name(dataset_id)

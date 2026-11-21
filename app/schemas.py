@@ -238,24 +238,122 @@ class DatasetImproveResponse(BaseModel):
 
 class AdminActivityItem(BaseModel):
     id: str
-    type: str = Field(description="USER_REGISTER, DATASET_UPLOAD, QUERY_EXECUTION, CREDIT_TRANSACTION")
+    type: str = Field(description="USER_REGISTER, USER_LOGIN, DATASET_UPLOAD, QUERY_EXECUTION, CREDIT_TRANSACTION, DATASET_IMPROVE, DATASET_UNLOCK")
     description: str
     user_id: Optional[str] = None
     user_email: Optional[str] = None
+    dataset_id: Optional[str] = None
     status: Optional[str] = "SUCCESS"
     timestamp: str
 
 
 class AdminOverviewResponse(BaseModel):
     total_users: int
+    active_users: int = 0
     total_datasets: int
     total_queries: int
     total_queries_successful: int
     total_queries_failed: int
+    query_success_rate: float = 100.0
     total_credits_issued: int
     total_credits_spent: int
+    total_credits_refunded: int = 0
+    net_credit_movement: int = 0
     net_credit_liability: int
     recent_activity: List[AdminActivityItem]
+
+
+class AdminTrendPoint(BaseModel):
+    bucket: str
+    count: int = 0
+
+
+class AdminQueryTrendPoint(BaseModel):
+    bucket: str
+    total: int = 0
+    successful: int = 0
+    failed: int = 0
+
+
+class AdminCreditTrendPoint(BaseModel):
+    bucket: str
+    awarded: int = 0
+    spent: int = 0
+    refunded: int = 0
+    net: int = 0
+
+
+class AdminActiveUserRank(BaseModel):
+    user_id: str
+    full_name: str
+    email: str
+    query_count: int
+    successful_queries: int = 0
+    failed_queries: int = 0
+    last_activity: Optional[str] = None
+
+
+class AdminContributorRank(BaseModel):
+    user_id: str
+    full_name: str
+    email: str
+    dataset_count: int
+    total_rows: int = 0
+    avg_quality_score: Optional[float] = None
+
+
+class AdminQueriedDatasetRank(BaseModel):
+    dataset_id: str
+    dataset_name: str
+    domain: str
+    owner_id: Optional[str] = None
+    owner_name: Optional[str] = None
+    query_count: int
+    successful_queries: int = 0
+    unlock_count: int = 0
+    quality_score: Optional[float] = None
+
+
+class AdminAnalyticsKpis(BaseModel):
+    total_users: int
+    users_in_period: int
+    users_delta_pct: Optional[float] = None
+    active_users: int
+    active_users_delta_pct: Optional[float] = None
+    total_datasets: int
+    datasets_in_period: int
+    datasets_delta_pct: Optional[float] = None
+    total_queries: int
+    queries_successful: int
+    queries_failed: int
+    query_success_rate: float
+    queries_delta_pct: Optional[float] = None
+    total_credits_issued: int
+    total_credits_spent: int
+    total_credits_refunded: int = 0
+    net_credit_movement: int
+    net_credit_liability: int
+    credits_issued_delta_pct: Optional[float] = None
+    credits_spent_delta_pct: Optional[float] = None
+    credits_earned_by_owners: int = 0
+    query_fees_collected: int = 0
+
+
+class AdminAnalyticsResponse(BaseModel):
+    range: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    granularity: str = "daily"
+    comparison_label: Optional[str] = None
+    kpis: AdminAnalyticsKpis
+    user_registration_trend: List[AdminTrendPoint]
+    dataset_upload_trend: List[AdminTrendPoint]
+    query_activity_trend: List[AdminQueryTrendPoint]
+    credit_movement_trend: List[AdminCreditTrendPoint]
+    most_active_users: List[AdminActiveUserRank]
+    most_contributing_users: List[AdminContributorRank]
+    most_queried_datasets: List[AdminQueriedDatasetRank]
+    data_limitations: List[str] = Field(default_factory=list)
 
 
 class AdminUserItem(BaseModel):
@@ -266,8 +364,10 @@ class AdminUserItem(BaseModel):
     reputation_score: int
     is_admin: bool
     account_status: str = "Active"
+    is_active: bool = False
     datasets_count: int = 0
     queries_count: int = 0
+    last_activity: Optional[str] = None
     created_at: str
 
 
@@ -288,7 +388,14 @@ class AdminUserDatasetItem(BaseModel):
     columns_count: int
     quality_score: Optional[float] = None
     unlock_price: int = 10
+    query_count: int = 0
+    basic_upload_reward: int = 0
+    quality_reward: int = 0
+    improvement_rewards: int = 0
     created_at: str
+    version_count: int = 1
+    availability: str = "Available"
+    versions: Optional[List[Dict[str, Any]]] = None
 
 
 class AdminUserDetailResponse(BaseModel):
@@ -300,10 +407,17 @@ class AdminUserDetailResponse(BaseModel):
     is_admin: bool
     account_status: str
     created_at: str
+    last_activity: Optional[str] = None
     total_datasets: int
     total_queries: int
+    total_queries_successful: int = 0
+    total_queries_failed: int = 0
+    query_success_rate: float = 100.0
     total_credits_earned: int
     total_credits_spent: int
+    total_credits_refunded: int = 0
+    total_unlocks: int = 0
+    total_improvements: int = 0
     datasets: List[AdminUserDatasetItem]
     recent_queries: List[Dict[str, Any]]
     recent_transactions: List[Dict[str, Any]]
@@ -325,8 +439,14 @@ class AdminDatasetItem(BaseModel):
     overall_score: Optional[float] = None
     evaluation_status: Optional[str] = None
     credits_awarded: Optional[int] = None
+    basic_upload_reward: int = 0
+    quality_reward: int = 0
+    improvement_rewards: int = 0
     unlock_price: int = 10
     unlock_count: int = 0
+    query_count: int = 0
+    version_count: int = 1
+    versions: Optional[List[Dict[str, Any]]] = None
     availability: str = "Available"
     content_summary: str
     created_at: str
@@ -338,6 +458,37 @@ class AdminDatasetListResponse(BaseModel):
     page: int
     limit: int
     has_more: bool
+    available_domains: List[str] = Field(default_factory=list)
+
+
+class AdminDatasetDetailResponse(BaseModel):
+    id: str
+    name: str
+    filename: str
+    domain: str
+    owner_id: str
+    owner_name: str
+    owner_email: str
+    rows_count: int
+    columns_count: int
+    schema_columns: List[Dict[str, str]] = Field(default_factory=list)
+    content_summary: str
+    unlock_price: int = 10
+    unlock_count: int = 0
+    query_count: int = 0
+    successful_queries: int = 0
+    failed_queries: int = 0
+    unique_queriers: int = 0
+    availability: str = "Available"
+    created_at: str
+    evaluation: Optional[Dict[str, Any]] = None
+    basic_upload_reward: int = 0
+    quality_reward: int = 0
+    improvement_rewards: int = 0
+    total_rewards: int = 0
+    version_count: int = 1
+    versions: List[Dict[str, Any]] = Field(default_factory=list)
+    recent_queries: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class AdminQueryItem(BaseModel):
@@ -353,6 +504,7 @@ class AdminQueryItem(BaseModel):
     execution_time_ms: int = 0
     rows_returned: int = 0
     credits_charged: int = 0
+    credits_refunded: int = 0
     error_message: Optional[str] = None
     timestamp: str
 
@@ -363,6 +515,7 @@ class AdminQueryListResponse(BaseModel):
     page: int
     limit: int
     has_more: bool
+    summary: Optional[Dict[str, Any]] = None
 
 
 class AdminTransactionItem(BaseModel):
@@ -373,7 +526,11 @@ class AdminTransactionItem(BaseModel):
     transaction_type: str
     amount: int
     balance_impact: str
+    balance_after: Optional[int] = None
     associated_resource: Optional[str] = None
+    related_dataset_id: Optional[str] = None
+    related_dataset_name: Optional[str] = None
+    related_query_id: Optional[str] = None
     description: str
     status: str
     timestamp: str
@@ -385,6 +542,7 @@ class AdminTransactionListResponse(BaseModel):
     page: int
     limit: int
     has_more: bool
+    summary: Optional[Dict[str, Any]] = None
 
 
 class AdminAuditLogItem(BaseModel):
@@ -400,6 +558,31 @@ class AdminAuditLogItem(BaseModel):
 
 class AdminAuditLogListResponse(BaseModel):
     items: List[AdminAuditLogItem]
+    total: int
+    page: int
+    limit: int
+    has_more: bool
+
+
+class AdminTimelineItem(BaseModel):
+    id: str
+    type: str  # USER_REGISTER, USER_LOGIN, DATASET_UPLOAD, QUERY_EXECUTION, CREDIT_TRANSACTION, DATASET_IMPROVE, DATASET_UNLOCK, ADMIN_AUDIT
+    title: str
+    description: str
+    timestamp: str
+    status: str = "SUCCESS"
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
+    user_name: Optional[str] = None
+    dataset_id: Optional[str] = None
+    dataset_name: Optional[str] = None
+    related_query_id: Optional[str] = None
+    related_transaction_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class AdminTimelineResponse(BaseModel):
+    items: List[AdminTimelineItem]
     total: int
     page: int
     limit: int

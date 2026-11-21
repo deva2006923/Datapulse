@@ -311,24 +311,129 @@ export interface ToastMessage {
 // Admin Dashboard Types
 export interface AdminActivityItem {
   id: string;
-  type: 'USER_REGISTER' | 'DATASET_UPLOAD' | 'QUERY_EXECUTION' | 'CREDIT_TRANSACTION';
+  type:
+    | 'USER_REGISTER'
+    | 'USER_LOGIN'
+    | 'DATASET_UPLOAD'
+    | 'QUERY_EXECUTION'
+    | 'CREDIT_TRANSACTION'
+    | 'DATASET_IMPROVE'
+    | 'DATASET_UNLOCK';
   description: string;
   user_id?: string;
   user_email?: string;
+  dataset_id?: string;
   status?: string;
   timestamp: string;
 }
 
 export interface AdminOverview {
   total_users: number;
+  active_users?: number;
   total_datasets: number;
   total_queries: number;
   total_queries_successful: number;
   total_queries_failed: number;
+  query_success_rate?: number;
   total_credits_issued: number;
   total_credits_spent: number;
+  total_credits_refunded?: number;
+  net_credit_movement?: number;
   net_credit_liability: number;
   recent_activity: AdminActivityItem[];
+}
+
+export interface AdminTrendPoint {
+  bucket: string;
+  count: number;
+}
+
+export interface AdminQueryTrendPoint {
+  bucket: string;
+  total: number;
+  successful: number;
+  failed: number;
+}
+
+export interface AdminCreditTrendPoint {
+  bucket: string;
+  awarded: number;
+  spent: number;
+  refunded: number;
+  net: number;
+}
+
+export interface AdminActiveUserRank {
+  user_id: string;
+  full_name: string;
+  email: string;
+  query_count: number;
+  successful_queries: number;
+  failed_queries: number;
+  last_activity?: string | null;
+}
+
+export interface AdminContributorRank {
+  user_id: string;
+  full_name: string;
+  email: string;
+  dataset_count: number;
+  total_rows: number;
+  avg_quality_score?: number | null;
+}
+
+export interface AdminQueriedDatasetRank {
+  dataset_id: string;
+  dataset_name: string;
+  domain: string;
+  owner_id?: string | null;
+  owner_name?: string | null;
+  query_count: number;
+  successful_queries: number;
+  unlock_count: number;
+  quality_score?: number | null;
+}
+
+export interface AdminAnalyticsKpis {
+  total_users: number;
+  users_in_period: number;
+  users_delta_pct?: number | null;
+  active_users: number;
+  active_users_delta_pct?: number | null;
+  total_datasets: number;
+  datasets_in_period: number;
+  datasets_delta_pct?: number | null;
+  total_queries: number;
+  queries_successful: number;
+  queries_failed: number;
+  query_success_rate: number;
+  queries_delta_pct?: number | null;
+  total_credits_issued: number;
+  total_credits_spent: number;
+  total_credits_refunded: number;
+  net_credit_movement: number;
+  net_credit_liability: number;
+  credits_issued_delta_pct?: number | null;
+  credits_spent_delta_pct?: number | null;
+  credits_earned_by_owners: number;
+  query_fees_collected: number;
+}
+
+export interface AdminAnalyticsResponse {
+  range: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  granularity: 'daily' | 'weekly' | 'monthly';
+  comparison_label?: string | null;
+  kpis: AdminAnalyticsKpis;
+  user_registration_trend: AdminTrendPoint[];
+  dataset_upload_trend: AdminTrendPoint[];
+  query_activity_trend: AdminQueryTrendPoint[];
+  credit_movement_trend: AdminCreditTrendPoint[];
+  most_active_users: AdminActiveUserRank[];
+  most_contributing_users: AdminContributorRank[];
+  most_queried_datasets: AdminQueriedDatasetRank[];
+  data_limitations: string[];
 }
 
 export interface AdminUserItem {
@@ -339,8 +444,10 @@ export interface AdminUserItem {
   reputation_score: number;
   is_admin: boolean;
   account_status: string;
+  is_active?: boolean;
   datasets_count: number;
   queries_count: number;
+  last_activity?: string | null;
   created_at: string;
 }
 
@@ -361,7 +468,14 @@ export interface AdminUserDatasetItem {
   columns_count: number;
   quality_score?: number | null;
   unlock_price: number;
+  query_count?: number;
+  basic_upload_reward?: number;
+  quality_reward?: number;
+  improvement_rewards?: number;
   created_at: string;
+  version_count?: number;
+  availability?: string;
+  versions?: Record<string, any>[];
 }
 
 export interface AdminUserDetail {
@@ -373,10 +487,17 @@ export interface AdminUserDetail {
   is_admin: boolean;
   account_status: string;
   created_at: string;
+  last_activity?: string | null;
   total_datasets: number;
   total_queries: number;
+  total_queries_successful?: number;
+  total_queries_failed?: number;
+  query_success_rate?: number;
   total_credits_earned: number;
   total_credits_spent: number;
+  total_credits_refunded?: number;
+  total_unlocks?: number;
+  total_improvements?: number;
   datasets: AdminUserDatasetItem[];
   recent_queries: Record<string, any>[];
   recent_transactions: Record<string, any>[];
@@ -398,8 +519,14 @@ export interface AdminDatasetItem {
   overall_score?: number | null;
   evaluation_status?: string | null;
   credits_awarded?: number | null;
+  basic_upload_reward?: number;
+  quality_reward?: number;
+  improvement_rewards?: number;
   unlock_price: number;
   unlock_count: number;
+  query_count?: number;
+  version_count?: number;
+  versions?: Record<string, any>[];
   availability: string;
   content_summary: string;
   created_at: string;
@@ -411,6 +538,70 @@ export interface AdminDatasetListResponse {
   page: number;
   limit: number;
   has_more: boolean;
+  available_domains?: string[];
+}
+
+export interface AdminDatasetDetail {
+  id: string;
+  name: string;
+  filename: string;
+  domain: string;
+  owner_id: string;
+  owner_name: string;
+  owner_email: string;
+  rows_count: number;
+  columns_count: number;
+  schema_columns: Array<{ name: string; type: string }>;
+  content_summary: string;
+  unlock_price: number;
+  unlock_count: number;
+  query_count: number;
+  successful_queries: number;
+  failed_queries: number;
+  unique_queriers: number;
+  availability: string;
+  created_at: string;
+  evaluation?: {
+    id: string;
+    status: string;
+    progress: number;
+    quality_score: number;
+    schema_fidelity_score: number;
+    completeness_score: number;
+    domain_relevance_score: number;
+    overall_score: number;
+    credits_awarded: number;
+    error_message?: string | null;
+    updated_at: string;
+    created_at: string;
+  } | null;
+  basic_upload_reward: number;
+  quality_reward: number;
+  improvement_rewards: number;
+  total_rewards: number;
+  version_count: number;
+  versions: Array<{
+    version: string;
+    quality_score: number;
+    relevance_score: number;
+    overall_score: number;
+    delta_score: number;
+    credits_awarded: number;
+    changes_summary: string;
+    created_at: string;
+  }>;
+  recent_queries: Array<{
+    id: string;
+    user_id: string;
+    user_name: string;
+    user_email: string;
+    natural_prompt: string;
+    status: string;
+    execution_time_ms: number;
+    rows_returned: number;
+    credits_charged: number;
+    timestamp: string;
+  }>;
 }
 
 export interface AdminQueryItem {
@@ -426,6 +617,7 @@ export interface AdminQueryItem {
   execution_time_ms: number;
   rows_returned: number;
   credits_charged: number;
+  credits_refunded?: number;
   error_message?: string | null;
   timestamp: string;
 }
@@ -436,6 +628,14 @@ export interface AdminQueryListResponse {
   page: number;
   limit: number;
   has_more: boolean;
+  summary?: {
+    total_queries: number;
+    successful_queries: number;
+    failed_queries: number;
+    success_rate: number;
+    avg_execution_time_ms: number;
+    total_credits_charged: number;
+  } | null;
 }
 
 export interface AdminTransactionItem {
@@ -446,7 +646,11 @@ export interface AdminTransactionItem {
   transaction_type: string;
   amount: number;
   balance_impact: string;
+  balance_after?: number | null;
   associated_resource?: string | null;
+  related_dataset_id?: string | null;
+  related_dataset_name?: string | null;
+  related_query_id?: string | null;
   description: string;
   status: string;
   timestamp: string;
@@ -458,6 +662,14 @@ export interface AdminTransactionListResponse {
   page: number;
   limit: number;
   has_more: boolean;
+  summary?: {
+    total_issued: number;
+    total_spent: number;
+    net_movement: number;
+    earned_by_owners: number;
+    query_fees_collected: number;
+    refunds_total: number;
+  } | null;
 }
 
 export interface AdminAuditLogItem {
@@ -473,6 +685,39 @@ export interface AdminAuditLogItem {
 
 export interface AdminAuditLogListResponse {
   items: AdminAuditLogItem[];
+  total: number;
+  page: number;
+  limit: number;
+  has_more: boolean;
+}
+
+export interface AdminTimelineItem {
+  id: string;
+  type:
+    | 'USER_REGISTER'
+    | 'USER_LOGIN'
+    | 'DATASET_UPLOAD'
+    | 'QUERY_EXECUTION'
+    | 'CREDIT_TRANSACTION'
+    | 'DATASET_IMPROVE'
+    | 'DATASET_UNLOCK'
+    | 'ADMIN_AUDIT';
+  title: string;
+  description: string;
+  timestamp: string;
+  status: string;
+  user_id?: string;
+  user_email?: string;
+  user_name?: string;
+  dataset_id?: string;
+  dataset_name?: string;
+  related_query_id?: string | null;
+  related_transaction_id?: string | null;
+  metadata?: Record<string, any>;
+}
+
+export interface AdminTimelineResponse {
+  items: AdminTimelineItem[];
   total: number;
   page: number;
   limit: number;
