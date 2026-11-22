@@ -14,12 +14,21 @@ os.environ["DUCKDB_PATH"] = temp_duckdb_path
 os.environ["DATASETS_STORAGE_DIR"] = temp_datasets_dir
 os.environ["EMBEDDINGS_ENABLED"] = "true"
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+# Keep unit/integration test runs deterministic and offline without burning real .env API quota
+os.environ["GEMINI_API_KEY"] = ""
+os.environ["AI_FALLBACK_PROVIDER"] = ""
+os.environ["AI_FALLBACK_API_KEY"] = ""
+os.environ["GROQ_API_KEY"] = ""
 
 from app.config import settings
 settings.DATABASE_PATH = temp_db_path
 settings.DUCKDB_PATH = temp_duckdb_path
 settings.DATASETS_STORAGE_DIR = temp_datasets_dir
 settings.RATE_LIMIT_ENABLED = False
+settings.GEMINI_API_KEY = None
+settings.AI_FALLBACK_PROVIDER = None
+settings.AI_FALLBACK_API_KEY = None
+settings.GROQ_API_KEY = None
 
 from app.main import app
 from app.database import init_db

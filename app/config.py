@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     GEMINI_MODEL: str = "gemini-2.5-flash"
 
+    # Secondary / Fallback AI Provider Settings (Groq default secondary provider)
+    AI_TIMEOUT_SECONDS: float = 20.0
+    AI_MAX_RETRIES: int = 2
+    AI_RETRY_BASE_DELAY_SECONDS: float = 0.5
+    AI_RETRY_MAX_WAIT_SECONDS: float = 4.0
+    AI_FALLBACK_PROVIDER: Optional[str] = "groq"
+    AI_FALLBACK_API_KEY: Optional[str] = None
+    AI_FALLBACK_MODEL: Optional[str] = None
+    AI_FALLBACK_BASE_URL: Optional[str] = None
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_BACKUP_MODELS: str = "openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.8-27b"
+
     # Marketplace / Credits Settings
     QUERY_COST: int = 1
     DATASET_OWNER_REWARD: int = 1
@@ -57,6 +70,12 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return (self.ENVIRONMENT or "").strip().lower() == "production"
+
+    @property
+    def groq_backup_models_list(self) -> List[str]:
+        if not self.GROQ_BACKUP_MODELS:
+            return []
+        return [m.strip() for m in self.GROQ_BACKUP_MODELS.split(",") if m.strip()]
 
     @property
     def max_upload_bytes(self) -> int:
