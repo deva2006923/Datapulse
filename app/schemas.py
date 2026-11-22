@@ -600,3 +600,31 @@ class AdminTimelineResponse(BaseModel):
     page: int
     limit: int
     has_more: bool
+
+
+class AdminDatasetImportResponse(BaseModel):
+    dataset_id: str
+    status: str = Field(description="imported, skipped, dry_run_ok, or would_skip")
+    dry_run: bool = False
+    already_exists: bool = False
+    name: str
+    filename: str
+    domain: str
+    owner_id: str
+    owner_email: str
+    owner_fallback_used: bool = False
+    rows_count: int
+    columns_count: int
+    unlock_price: int
+    quality_score: float
+    schema_fidelity_score: float
+    completeness_score: float
+    domain_relevance_score: float
+    overall_score: float
+    credits_awarded: int = 0
+    content_hash: str
+    storage_available: bool
+    duckdb_table_name: str
+    duckdb_row_count: int
+    created_at: str
+    message: str

@@ -1,3 +1,4 @@
+import json
 import re
 import logging
 import threading
@@ -214,14 +215,46 @@ def validate_sql(
         if tbl != allowed_table.lower() and tbl not in cte_names:
             raise SQLSecurityError(f"Query references unauthorized table '{tbl}'. Only '{allowed_table}' is permitted.")
 
-    # 7. Semantic, Binder & Physical Plan Verification using DuckDB EXPLAIN
+    # 7. Semantic, Binder & Physical Plan Verification using DuckDB EXPLAIN (FORMAT JSON)
     try:
         conn = get_duckdb_connection()
-        explain_rows = conn.execute(f"EXPLAIN {cleaned}").fetchall()
+        explain_rows = conn.execute(f"EXPLAIN (FORMAT JSON) {cleaned}").fetchall()
         plan_text = "\n".join(str(r[1]) if len(r) > 1 else str(r[0]) for r in explain_rows)
-        # Verify DuckDB's resolved plan never scans any other dataset or internal registry table
+        # Verify DuckDB's resolved JSON plan never scans any other dataset or internal registry table.
+        # Using FORMAT JSON avoids ASCII box-drawing line wraps that truncate long table names.
         if "_dataset_registry" in plan_text.lower():
             raise SQLSecurityError("Query plan references unauthorized internal registry table.")
+
+        def _extract_plan_tables(node: Any, out: List[str]) -> None:
+            if isinstance(node, list):
+                for item in node:
+                    _extract_plan_tables(item, out)
+            elif isinstance(node, dict):
+                extra = node.get("extra_info")
+                if isinstance(extra, dict):
+                    tbl_val = extra.get("Table")
+                    if isinstance(tbl_val, str) and tbl_val.strip():
+                        out.append(tbl_val.strip())
+                children = node.get("children")
+                if children:
+                    _extract_plan_tables(children, out)
+
+        plan_tables: List[str] = []
+        try:
+            parsed_plan = json.loads(plan_text)
+            _extract_plan_tables(parsed_plan, plan_tables)
+        except Exception:
+            pass
+
+        for raw_plan_tbl in plan_tables:
+            short_tbl = raw_plan_tbl.split(".")[-1].strip("\"'`")
+            if short_tbl.lower() == "_dataset_registry":
+                raise SQLSecurityError("Query plan references unauthorized internal registry table.")
+            if short_tbl.lower() != allowed_table.lower():
+                raise SQLSecurityError(
+                    f"Query plan references unauthorized table '{short_tbl}'. Only '{allowed_table}' is permitted."
+                )
+
         for ds_tbl in re.findall(r"\bdataset_ds_[a-zA-Z0-9_]+\b", plan_text, re.IGNORECASE):
             if ds_tbl.lower() != allowed_table.lower():
                 raise SQLSecurityError(

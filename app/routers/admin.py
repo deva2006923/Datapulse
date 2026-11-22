@@ -1,12 +1,27 @@
 import json
+import logging
+import os
 import re
 import datetime
+import threading
+import uuid
 from typing import Optional, List, Any, Dict, Tuple, Set
-from fastapi import HTTPException, status, Depends, Query, Request
+from fastapi import HTTPException, status, Depends, Query, Request, UploadFile, File, Form
 from app.routers import TrailingSlashRouter
+from app.config import settings
 from app.database import get_db_connection
 from app.auth import get_current_admin_user, log_admin_audit
-from app.services.storage import get_existing_dataset_ids
+from app.services.evaluation import parse_and_evaluate_csv
+from app.services.storage import (
+    DATASET_ID_REGEX,
+    get_existing_dataset_ids,
+    persist_dataset,
+    delete_dataset_storage,
+    dataset_table_exists,
+    get_dataset_row_count,
+    get_dataset_columns,
+    get_dataset_table_name,
+)
 from app.schemas import (
     AdminOverviewResponse,
     AdminActivityItem,
@@ -25,6 +40,7 @@ from app.schemas import (
     AdminDatasetItem,
     AdminDatasetListResponse,
     AdminDatasetDetailResponse,
+    AdminDatasetImportResponse,
     AdminQueryItem,
     AdminQueryListResponse,
     AdminTransactionItem,
@@ -35,7 +51,10 @@ from app.schemas import (
     AdminTimelineResponse,
 )
 
+logger = logging.getLogger(__name__)
 router = TrailingSlashRouter(prefix="/admin", tags=["Admin Dashboard"])
+_dataset_import_lock = threading.Lock()
+_VALID_EVAL_STATUSES = {"completed", "pending", "processing", "failed"}
 
 OWNER_EARNING_TYPES = (
     "upload_reward",
@@ -2870,3 +2889,427 @@ def get_admin_global_activity(
         limit=limit,
         has_more=(offset + len(items)) < total,
     )
+
+
+def _validate_score_bound(value: Optional[float], field_name: str, fallback: float) -> float:
+    if value is None:
+        return round(float(fallback), 2)
+    if value < 0.0 or value > 100.0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{field_name} must be between 0.0 and 100.0.",
+        )
+    return round(float(value), 2)
+
+
+def _validate_iso_timestamp(ts_value: Optional[str]) -> str:
+    if not ts_value or not ts_value.strip():
+        return datetime.datetime.utcnow().isoformat()
+    cleaned = ts_value.strip()
+    candidate = cleaned.replace(" ", "T")
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    try:
+        datetime.datetime.fromisoformat(candidate)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="created_at must be a valid ISO-8601 timestamp.",
+        )
+    return cleaned
+
+
+def _resolve_import_owner(cursor, requested_owner_email: Optional[str], admin: dict) -> Tuple[str, str, bool]:
+    """
+    Resolve dataset owner by email if that account exists in production.
+    Otherwise fall back to the configured platform administrator account.
+    Returns (owner_id, owner_email, owner_fallback_used).
+    """
+    norm_requested = (requested_owner_email or "").strip().lower()
+    if norm_requested:
+        cursor.execute(
+            "SELECT id, email FROM users WHERE LOWER(email) = ? LIMIT 1",
+            (norm_requested,),
+        )
+        matched = cursor.fetchone()
+        if matched:
+            return matched["id"], matched["email"], False
+
+    configured_admin_email = (
+        getattr(settings, "ADMIN_EMAIL", "datapulseapplication@gmail.com") or "datapulseapplication@gmail.com"
+    ).strip().lower()
+    cursor.execute(
+        "SELECT id, email FROM users WHERE LOWER(email) = ? LIMIT 1",
+        (configured_admin_email,),
+    )
+    admin_row = cursor.fetchone()
+    if admin_row:
+        fallback_used = bool(norm_requested and norm_requested != admin_row["email"].strip().lower())
+        return admin_row["id"], admin_row["email"], fallback_used
+
+    fallback_used = bool(norm_requested and norm_requested != (admin.get("email") or "").strip().lower())
+    return admin["id"], admin["email"], fallback_used
+
+
+def _build_existing_dataset_import_response(
+    cursor,
+    existing_ds,
+    dry_run: bool,
+    fallback_content_hash: str,
+) -> AdminDatasetImportResponse:
+    dataset_id = existing_ds["id"]
+    cursor.execute("SELECT email FROM users WHERE id = ? LIMIT 1", (existing_ds["user_id"],))
+    owner_row = cursor.fetchone()
+    owner_email = owner_row["email"] if owner_row else ""
+
+    cursor.execute("SELECT * FROM evaluations WHERE dataset_id = ? LIMIT 1", (dataset_id,))
+    eval_row = cursor.fetchone()
+
+    table_name = get_dataset_table_name(dataset_id)
+    storage_ok = dataset_table_exists(dataset_id)
+    duckdb_rows = get_dataset_row_count(dataset_id) if storage_ok else 0
+
+    return AdminDatasetImportResponse(
+        dataset_id=dataset_id,
+        status="would_skip" if dry_run else "skipped",
+        dry_run=dry_run,
+        already_exists=True,
+        name=existing_ds["name"],
+        filename=existing_ds["filename"],
+        domain=existing_ds["domain"],
+        owner_id=existing_ds["user_id"],
+        owner_email=owner_email,
+        owner_fallback_used=False,
+        rows_count=int(existing_ds["rows_count"] or 0),
+        columns_count=int(existing_ds["columns_count"] or 0),
+        unlock_price=int(existing_ds["unlock_price"] if existing_ds["unlock_price"] is not None else 10),
+        quality_score=float(eval_row["quality_score"]) if eval_row else 0.0,
+        schema_fidelity_score=float(eval_row["schema_fidelity_score"]) if eval_row else 0.0,
+        completeness_score=float(eval_row["completeness_score"]) if eval_row else 0.0,
+        domain_relevance_score=float(eval_row["domain_relevance_score"]) if eval_row else 0.0,
+        overall_score=float(eval_row["overall_score"]) if eval_row else 0.0,
+        credits_awarded=0,
+        content_hash=(existing_ds["content_hash"] or fallback_content_hash),
+        storage_available=storage_ok,
+        duckdb_table_name=table_name,
+        duckdb_row_count=duckdb_rows,
+        created_at=existing_ds["created_at"],
+        message=(
+            f"Dry run: dataset '{dataset_id}' already exists and would be skipped."
+            if dry_run
+            else f"Dataset '{dataset_id}' already exists; skipped without modifying existing data."
+        ),
+    )
+
+
+@router.post("/datasets/import", response_model=AdminDatasetImportResponse)
+async def import_admin_dataset(
+    request: Request,
+    file: UploadFile = File(...),
+    dataset_id: str = Form(...),
+    name: str = Form(...),
+    filename: Optional[str] = Form(None),
+    domain: str = Form("general"),
+    content_summary: Optional[str] = Form(None),
+    unlock_price: int = Form(10),
+    owner_email: Optional[str] = Form(None),
+    created_at: Optional[str] = Form(None),
+    quality_score: Optional[float] = Form(None),
+    schema_fidelity_score: Optional[float] = Form(None),
+    completeness_score: Optional[float] = Form(None),
+    domain_relevance_score: Optional[float] = Form(None),
+    overall_score: Optional[float] = Form(None),
+    eval_status: str = Form("completed"),
+    eval_progress: int = Form(100),
+    dry_run: bool = Form(False),
+    admin: dict = Depends(get_current_admin_user),
+):
+    """
+    Admin-only idempotent dataset migration/import endpoint.
+
+    Guarantees:
+      - Requires verified administrator authentication (401/403 otherwise).
+      - Preserves explicit dataset_id, metadata, evaluation scores, and unlock_price.
+      - Preserves existing production owners by email; falls back to configured ADMIN_EMAIL.
+      - Awards ZERO upload/quality credits and creates ZERO credit_transactions rows.
+      - Allows distinct dataset_id listings even when CSV content_hash matches another listing.
+      - Deduplicates strictly by dataset_id (skips cleanly if dataset_id already exists).
+      - Supports dry_run=true with zero database or storage writes.
+      - Atomic write with automatic SQLite + DuckDB + CSV rollback on any failure.
+    """
+    clean_dataset_id = (dataset_id or "").strip()
+    if not clean_dataset_id or len(clean_dataset_id) > 64 or not DATASET_ID_REGEX.match(clean_dataset_id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid dataset_id format. Must match '^ds_[a-zA-Z0-9_-]+$' and be <= 64 characters.",
+        )
+
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Dataset name is required.",
+        )
+
+    raw_filename = (filename or file.filename or "").strip()
+    effective_filename = os.path.basename(raw_filename.replace("\\", "/"))
+    if not effective_filename or not effective_filename.lower().endswith(".csv"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only CSV files (.csv) are supported for dataset import.",
+        )
+
+    clean_domain = (domain or "general").strip() or "general"
+
+    if unlock_price < 0 or unlock_price > 10000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="unlock_price must be between 0 and 10000.",
+        )
+
+    clean_eval_status = (eval_status or "completed").strip().lower()
+    if clean_eval_status not in _VALID_EVAL_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"eval_status must be one of {sorted(_VALID_EVAL_STATUSES)}.",
+        )
+
+    if eval_progress < 0 or eval_progress > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="eval_progress must be between 0 and 100.",
+        )
+
+    effective_created_at = _validate_iso_timestamp(created_at)
+
+    content_bytes = await file.read(settings.max_upload_bytes + 1)
+    if len(content_bytes) > settings.max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"CSV file exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+        )
+    csv_content = content_bytes.decode("utf-8", errors="replace")
+
+    eval_check = parse_and_evaluate_csv(csv_content, effective_filename, clean_domain)
+    if not eval_check["valid"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=eval_check["error"],
+        )
+
+    cleaned_csv = eval_check.get("cleaned_csv") or csv_content
+    content_hash = eval_check.get("content_hash") or ""
+    rows_count = int(eval_check["rows_count"])
+    columns_count = int(eval_check["columns_count"])
+    schema_json_str = json.dumps(eval_check["schema"])
+
+    computed_quality, computed_fidelity, computed_completeness, computed_relevance, computed_overall = (
+        eval_check["scores"][:5]
+    )
+    final_quality = _validate_score_bound(quality_score, "quality_score", computed_quality)
+    final_fidelity = _validate_score_bound(schema_fidelity_score, "schema_fidelity_score", computed_fidelity)
+    final_completeness = _validate_score_bound(completeness_score, "completeness_score", computed_completeness)
+    final_relevance = _validate_score_bound(domain_relevance_score, "domain_relevance_score", computed_relevance)
+    final_overall = _validate_score_bound(overall_score, "overall_score", computed_overall)
+
+    effective_summary = (
+        (content_summary or "").strip()
+        or f"Structured dataset with {rows_count} rows across {columns_count} columns in the {clean_domain} domain."
+    )
+    table_name = get_dataset_table_name(clean_dataset_id)
+    client_ip = request.client.host if request.client else None
+
+    with _dataset_import_lock:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # 1. Strict ID-based idempotency check (never overwrites existing dataset)
+        cursor.execute("SELECT * FROM datasets WHERE id = ? LIMIT 1", (clean_dataset_id,))
+        existing_ds = cursor.fetchone()
+        if existing_ds:
+            resp = _build_existing_dataset_import_response(
+                cursor=cursor,
+                existing_ds=existing_ds,
+                dry_run=dry_run,
+                fallback_content_hash=content_hash,
+            )
+            if not dry_run:
+                log_admin_audit(
+                    admin_user_id=admin["id"],
+                    admin_email=admin["email"],
+                    action="IMPORT_DATASET_SKIPPED",
+                    target_resource=clean_dataset_id,
+                    details=f"Skipped existing dataset '{clean_dataset_id}' (storage_available={resp.storage_available})",
+                    ip_address=client_ip,
+                )
+            return resp
+
+        # 2. Resolve target owner (preserve existing user by email, else configured admin)
+        resolved_owner_id, resolved_owner_email, owner_fallback_used = _resolve_import_owner(
+            cursor=cursor,
+            requested_owner_email=owner_email,
+            admin=admin,
+        )
+
+        # 3. Dry-run exits before any write to disk, DuckDB, or SQLite
+        if dry_run:
+            return AdminDatasetImportResponse(
+                dataset_id=clean_dataset_id,
+                status="dry_run_ok",
+                dry_run=True,
+                already_exists=False,
+                name=clean_name,
+                filename=effective_filename,
+                domain=clean_domain,
+                owner_id=resolved_owner_id,
+                owner_email=resolved_owner_email,
+                owner_fallback_used=owner_fallback_used,
+                rows_count=rows_count,
+                columns_count=columns_count,
+                unlock_price=unlock_price,
+                quality_score=final_quality,
+                schema_fidelity_score=final_fidelity,
+                completeness_score=final_completeness,
+                domain_relevance_score=final_relevance,
+                overall_score=final_overall,
+                credits_awarded=0,
+                content_hash=content_hash,
+                storage_available=False,
+                duckdb_table_name=table_name,
+                duckdb_row_count=0,
+                created_at=effective_created_at,
+                message=(
+                    f"Dry run validated dataset '{clean_dataset_id}' ({rows_count} rows, {columns_count} cols). "
+                    f"Owner resolved to {resolved_owner_email}"
+                    + (" (fallback to admin)." if owner_fallback_used else " (preserved).")
+                ),
+            )
+
+        # 4. Persist CSV + DuckDB analytical table
+        try:
+            persist_result = persist_dataset(
+                dataset_id=clean_dataset_id,
+                user_id=resolved_owner_id,
+                filename=effective_filename,
+                csv_content=cleaned_csv,
+                rows_count=rows_count,
+                columns_count=columns_count,
+            )
+        except Exception:
+            logger.exception("Admin import failed during DuckDB/CSV persistence for %s", clean_dataset_id)
+            delete_dataset_storage(clean_dataset_id)
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Failed to persist imported dataset into analytical storage.",
+            )
+
+        # 5. Atomic SQLite metadata + evaluation insert (strictly 0 credits awarded, 0 credit_transactions)
+        evaluation_id = f"eval_{uuid.uuid4().hex[:12]}"
+        try:
+            if not dataset_table_exists(clean_dataset_id):
+                raise RuntimeError(f"DuckDB table verification failed for {clean_dataset_id}")
+            duckdb_rows = get_dataset_row_count(clean_dataset_id)
+            duckdb_cols = len(get_dataset_columns(clean_dataset_id))
+            if duckdb_rows != rows_count or duckdb_cols != columns_count:
+                raise RuntimeError(
+                    f"DuckDB verification mismatch for {clean_dataset_id}: "
+                    f"expected {rows_count}x{columns_count}, got {duckdb_rows}x{duckdb_cols}"
+                )
+
+            cursor.execute(
+                """
+                INSERT INTO datasets (
+                    id, user_id, name, filename, domain, rows_count, columns_count,
+                    schema_json, content_summary, unlock_price, content_hash, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clean_dataset_id,
+                    resolved_owner_id,
+                    clean_name,
+                    effective_filename,
+                    clean_domain,
+                    rows_count,
+                    columns_count,
+                    schema_json_str,
+                    effective_summary,
+                    unlock_price,
+                    content_hash,
+                    effective_created_at,
+                ),
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO evaluations (
+                    id, dataset_id, status, progress, quality_score, schema_fidelity_score,
+                    completeness_score, domain_relevance_score, overall_score, credits_awarded,
+                    error_message, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                """,
+                (
+                    evaluation_id,
+                    clean_dataset_id,
+                    clean_eval_status,
+                    eval_progress,
+                    final_quality,
+                    final_fidelity,
+                    final_completeness,
+                    final_relevance,
+                    final_overall,
+                    effective_created_at,
+                    effective_created_at,
+                ),
+            )
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            delete_dataset_storage(clean_dataset_id)
+            logger.exception("Admin import failed during SQLite registration/verification for %s; rolled back.", clean_dataset_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to register dataset '{clean_dataset_id}'; all changes rolled back.",
+            )
+
+        log_admin_audit(
+            admin_user_id=admin["id"],
+            admin_email=admin["email"],
+            action="IMPORT_DATASET",
+            target_resource=clean_dataset_id,
+            details=(
+                f"Imported dataset '{clean_name}' ({rows_count}x{columns_count}, unlock={unlock_price} cr, "
+                f"owner={resolved_owner_email}, fallback={owner_fallback_used}, migration_credits=0)"
+            ),
+            ip_address=client_ip,
+        )
+
+        return AdminDatasetImportResponse(
+            dataset_id=clean_dataset_id,
+            status="imported",
+            dry_run=False,
+            already_exists=False,
+            name=clean_name,
+            filename=effective_filename,
+            domain=clean_domain,
+            owner_id=resolved_owner_id,
+            owner_email=resolved_owner_email,
+            owner_fallback_used=owner_fallback_used,
+            rows_count=rows_count,
+            columns_count=columns_count,
+            unlock_price=unlock_price,
+            quality_score=final_quality,
+            schema_fidelity_score=final_fidelity,
+            completeness_score=final_completeness,
+            domain_relevance_score=final_relevance,
+            overall_score=final_overall,
+            credits_awarded=0,
+            content_hash=content_hash,
+            storage_available=True,
+            duckdb_table_name=persist_result["table_name"],
+            duckdb_row_count=int(persist_result["rows_count"]),
+            created_at=effective_created_at,
+            message=f"Successfully imported dataset '{clean_dataset_id}' with 0 migration credits.",
+        )
