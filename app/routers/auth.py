@@ -1,10 +1,18 @@
 import uuid
 import datetime
-from fastapi import HTTPException, status, Depends
+from typing import Optional
+from fastapi import HTTPException, Header, status, Depends
 from app.routers import TrailingSlashRouter
 from app.database import get_db_connection
 from app.schemas import UserRegisterRequest, UserLoginRequest, AuthTokenResponse, UserResponse
-from app.auth import hash_password, verify_password, create_access_token, get_current_user
+from app.auth import (
+    hash_password,
+    verify_password,
+    needs_password_rehash,
+    create_access_token,
+    revoke_access_token,
+    get_current_user,
+)
 from app.services.reputation import sync_and_get_user_reputation, DEFAULT_INITIAL_REPUTATION
 
 router = TrailingSlashRouter(tags=["Authentication"])
@@ -74,6 +82,15 @@ def login(req: UserLoginRequest):
         )
         
     user_id = row["id"]
+
+    # Transparently upgrade legacy SHA-256 password hashes to salted PBKDF2-HMAC-SHA256
+    if needs_password_rehash(row["password_hash"]):
+        cursor.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (hash_password(req.password), user_id),
+        )
+        conn.commit()
+
     token = create_access_token(user_id)
     rep_score = sync_and_get_user_reputation(user_id, conn)
 
@@ -121,4 +138,17 @@ def get_me(user: dict = Depends(get_current_user)):
         is_admin=is_admin,
         created_at=user["created_at"]
     )
+
+
+@router.post("/auth/logout")
+def logout(
+    authorization: Optional[str] = Header(None),
+    user: dict = Depends(get_current_user),
+):
+    """Revokes the caller's active Bearer token server-side."""
+    if authorization:
+        parts = authorization.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            revoke_access_token(parts[1])
+    return {"status": "logged_out"}
 

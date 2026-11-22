@@ -13,11 +13,13 @@ os.environ["DATABASE_PATH"] = temp_db_path
 os.environ["DUCKDB_PATH"] = temp_duckdb_path
 os.environ["DATASETS_STORAGE_DIR"] = temp_datasets_dir
 os.environ["EMBEDDINGS_ENABLED"] = "true"
+os.environ["RATE_LIMIT_ENABLED"] = "false"
 
 from app.config import settings
 settings.DATABASE_PATH = temp_db_path
 settings.DUCKDB_PATH = temp_duckdb_path
 settings.DATASETS_STORAGE_DIR = temp_datasets_dir
+settings.RATE_LIMIT_ENABLED = False
 
 from app.main import app
 from app.database import init_db

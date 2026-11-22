@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     ADMIN_EMAIL: str = "datapulseapplication@gmail.com"
     ADMIN_PASSWORD: Optional[str] = None
 
+    # Security, Sessions, Query Limits & Rate Limiting
+    TOKEN_TTL_HOURS: int = 24
+    QUERY_TIMEOUT_SECONDS: int = 10
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_AUTH_PER_MIN: int = 20
+    RATE_LIMIT_QUERY_PER_MIN: int = 30
+    RATE_LIMIT_UPLOAD_PER_MIN: int = 15
+    RATE_LIMIT_DEFAULT_PER_MIN: int = 180
+
     SECRET_KEY: str = "datapulse-production-secret-key-replace-in-env"
     DATABASE_PATH: str = "datapulse.db"
     DUCKDB_PATH: str = "datapulse_analytics.duckdb"

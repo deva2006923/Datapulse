@@ -61,7 +61,7 @@ def test_first_time_startup_provisioning_creates_hashed_admin():
         row = rows[0]
         assert row["is_admin"] == 1
         assert row["password_hash"] != "StrongStartupAdminPass123!"
-        assert len(row["password_hash"]) == 64  # SHA-256 hex digest
+        assert row["password_hash"].startswith("pbkdf2_sha256$")
 
         # Admin can log in and access admin dashboard endpoints
         login_res = client.post(

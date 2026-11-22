@@ -51,6 +51,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS tokens (
         token TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
+        expires_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(user_id) REFERENCES users(id)
     );
@@ -65,6 +66,7 @@ def init_db():
         columns_count INTEGER NOT NULL,
         schema_json TEXT NOT NULL,
         content_summary TEXT NOT NULL,
+        content_hash TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(user_id) REFERENCES users(id)
     );
@@ -168,11 +170,31 @@ def _run_safe_migrations(conn: sqlite3.Connection):
     if "is_admin" not in user_cols:
         cursor.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
 
-    # Check datasets table for unlock_price
+    # Check tokens table for expires_at
+    cursor.execute("PRAGMA table_info(tokens)")
+    token_cols = [r[1] for r in cursor.fetchall()]
+    if "expires_at" not in token_cols:
+        cursor.execute("ALTER TABLE tokens ADD COLUMN expires_at TIMESTAMP")
+
+    # Check datasets table for unlock_price and content_hash
     cursor.execute("PRAGMA table_info(datasets)")
     dataset_cols = [r[1] for r in cursor.fetchall()]
     if "unlock_price" not in dataset_cols:
         cursor.execute("ALTER TABLE datasets ADD COLUMN unlock_price INTEGER NOT NULL DEFAULT 10")
+    if "content_hash" not in dataset_cols:
+        cursor.execute("ALTER TABLE datasets ADD COLUMN content_hash TEXT")
+
+    # Performance & security indexes (idempotent, non-destructive)
+    cursor.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_tokens_user_id ON tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_tokens_expires_at ON tokens(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_datasets_user_id ON datasets(user_id);
+        CREATE INDEX IF NOT EXISTS idx_datasets_user_hash ON datasets(user_id, content_hash);
+        CREATE INDEX IF NOT EXISTS idx_queries_user_created ON queries(user_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_queries_dataset_id ON queries(dataset_id);
+        CREATE INDEX IF NOT EXISTS idx_credit_tx_user_created ON credit_transactions(user_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_logs(created_at);
+    """)
 
     # Check queries table for user-specific query history columns
     cursor.execute("PRAGMA table_info(queries)")

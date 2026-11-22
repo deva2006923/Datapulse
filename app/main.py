@@ -1,4 +1,7 @@
 import logging
+import threading
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +17,33 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger("datapulse")
+
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+
+
+def reset_rate_limiter() -> None:
+    """Clear sliding-window rate-limit state (primarily for tests)."""
+    with _rate_limit_lock:
+        _rate_limit_buckets.clear()
+
+
+def _resolve_rate_limit(path: str, method: str) -> tuple[str, int]:
+    norm = (path or "/").rstrip("/") or "/"
+    if norm in ("/auth/login", "/auth/register"):
+        return "auth", max(1, int(settings.RATE_LIMIT_AUTH_PER_MIN))
+    if norm == "/query" and method.upper() == "POST":
+        return "query", max(1, int(settings.RATE_LIMIT_QUERY_PER_MIN))
+    if norm == "/datasets/upload" and method.upper() == "POST":
+        return "upload", max(1, int(settings.RATE_LIMIT_UPLOAD_PER_MIN))
+    return "default", max(1, int(settings.RATE_LIMIT_DEFAULT_PER_MIN))
+
+
+def _get_client_ip(request: Request) -> str:
+    xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if xff:
+        return xff
+    return request.client.host if request.client else "unknown"
 
 _INSECURE_SECRET_DEFAULTS = {
     "dev-secret-key-change-in-production",
@@ -83,6 +113,43 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+
+@app.middleware("http")
+async def security_and_rate_limit_middleware(request: Request, call_next):
+    path = request.url.path or "/"
+    method = request.method.upper()
+
+    # Apply sliding-window per-IP rate limiting (skip health probes and CORS preflight)
+    if settings.RATE_LIMIT_ENABLED and method != "OPTIONS" and not path.rstrip("/").endswith("/health"):
+        bucket_name, max_requests = _resolve_rate_limit(path, method)
+        client_ip = _get_client_ip(request)
+        now = time.monotonic()
+        window_seconds = 60.0
+
+        with _rate_limit_lock:
+            q = _rate_limit_buckets[(client_ip, bucket_name)]
+            while q and (now - q[0]) >= window_seconds:
+                q.popleft()
+            if len(q) >= max_requests:
+                retry_after = max(1, int(window_seconds - (now - q[0])))
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too many requests. Please slow down and try again shortly."},
+                    headers={"Retry-After": str(retry_after)},
+                )
+            q.append(now)
+
+    response = await call_next(request)
+
+    # Harden HTTP security headers on all responses
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    if path.startswith("/auth") or path.startswith("/admin"):
+        response.headers.setdefault("Cache-Control", "no-store")
+
+    return response
 
 # Include Routers (all using TrailingSlashRouter for seamless slash/no-slash matching)
 app.include_router(health.router)
