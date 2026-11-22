@@ -1,6 +1,8 @@
 import csv
+import hashlib
 import io
 import json
+import re
 import uuid
 import datetime
 from typing import Dict, Any, Tuple
@@ -11,6 +13,33 @@ from app.services.pricing import calculate_dataset_unlock_price
 from app.services.reputation import sync_and_get_user_reputation
 
 BASIC_UPLOAD_REWARD = 50
+MAX_CSV_COLUMNS = 250
+MAX_CSV_ROWS = 250000
+_SIGNED_NUMBER_RE = re.compile(r"^[+-]\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def sanitize_csv_cell(cell: str) -> str:
+    """
+    Neutralize spreadsheet formula injection payloads (=, @, tab, CR, or non-numeric +/-)
+    while preserving legitimate signed numeric values (e.g. -42, -3.14, +100).
+    """
+    if not cell:
+        return cell
+    trimmed_left = cell.lstrip(" ")
+    if not trimmed_left:
+        return cell
+    first = trimmed_left[0]
+    if first in ("=", "@", "\t", "\r"):
+        return "'" + cell
+    if first in ("+", "-") and not _SIGNED_NUMBER_RE.match(trimmed_left.strip()):
+        return "'" + cell
+    return cell
+
+
+def compute_csv_content_hash(cleaned_csv: str) -> str:
+    """Compute a deterministic SHA-256 fingerprint of normalized CSV content."""
+    normalized = (cleaned_csv or "").replace("\r\n", "\n").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict[str, Any]:
     """
@@ -29,6 +58,22 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
             "schema": {},
             "scores": (0.0, 0.0, 0.0, 0.0, 0.0, 0, 5),
             "cleaned_csv": "",
+            "content_hash": "",
+            "unlock_price": 5,
+            "basic_reward": 0,
+            "quality_reward": 0
+        }
+
+    if "\x00" in csv_content:
+        return {
+            "valid": False,
+            "error": "Malformed CSV: binary or null-byte content is not permitted",
+            "rows_count": 0,
+            "columns_count": 0,
+            "schema": {},
+            "scores": (0.0, 0.0, 0.0, 0.0, 0.0, 0, 5),
+            "cleaned_csv": "",
+            "content_hash": "",
             "unlock_price": 5,
             "basic_reward": 0,
             "quality_reward": 0
@@ -93,6 +138,37 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
             "schema": {h: "string" for h in header},
             "scores": (0.0, 0.0, 0.0, 0.0, 0.0, 0, 5),
             "cleaned_csv": "",
+            "content_hash": "",
+            "unlock_price": 5,
+            "basic_reward": 0,
+            "quality_reward": 0
+        }
+
+    if total_cols > MAX_CSV_COLUMNS:
+        return {
+            "valid": False,
+            "error": f"CSV exceeds maximum supported column count ({MAX_CSV_COLUMNS})",
+            "rows_count": total_rows,
+            "columns_count": total_cols,
+            "schema": {},
+            "scores": (0.0, 0.0, 0.0, 0.0, 0.0, 0, 5),
+            "cleaned_csv": "",
+            "content_hash": "",
+            "unlock_price": 5,
+            "basic_reward": 0,
+            "quality_reward": 0
+        }
+
+    if total_rows > MAX_CSV_ROWS:
+        return {
+            "valid": False,
+            "error": f"CSV exceeds maximum supported row count ({MAX_CSV_ROWS})",
+            "rows_count": total_rows,
+            "columns_count": total_cols,
+            "schema": {},
+            "scores": (0.0, 0.0, 0.0, 0.0, 0.0, 0, 5),
+            "cleaned_csv": "",
+            "content_hash": "",
             "unlock_price": 5,
             "basic_reward": 0,
             "quality_reward": 0
@@ -101,6 +177,18 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
     # Sanitize and deduplicate column names
     clean_header = sanitize_headers(header)
 
+    # Normalize ragged rows and neutralize spreadsheet formula injection payloads
+    sanitized_rows = []
+    for row in rows:
+        if len(row) < total_cols:
+            padded = list(row) + [""] * (total_cols - len(row))
+        elif len(row) > total_cols:
+            padded = list(row[:total_cols])
+        else:
+            padded = list(row)
+        sanitized_rows.append([sanitize_csv_cell(cell) for cell in padded])
+    rows = sanitized_rows
+
     # Reconstruct cleaned CSV
     out = io.StringIO()
     writer = csv.writer(out)
@@ -108,6 +196,7 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
     for row in rows:
         writer.writerow(row)
     cleaned_csv = out.getvalue()
+    content_hash = compute_csv_content_hash(cleaned_csv)
 
     # Completeness check
     empty_cells = sum(row.count("") for row in rows)
@@ -166,6 +255,7 @@ def parse_and_evaluate_csv(csv_content: str, filename: str, domain: str) -> Dict
         "schema": schema,
         "scores": (quality_score, schema_fidelity_score, completeness_score, domain_relevance_score, overall_score, credits_awarded, unlock_price),
         "cleaned_csv": cleaned_csv,
+        "content_hash": content_hash,
         "unlock_price": unlock_price,
         "basic_reward": basic_reward,
         "quality_reward": quality_reward
