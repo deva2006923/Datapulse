@@ -21,23 +21,23 @@ class Settings(BaseSettings):
     # AI & Embeddings Flag
     EMBEDDINGS_ENABLED: bool = True
 
-    # AI & LLM Provider Settings
-    AI_PROVIDER: str = "gemini"
-    GEMINI_API_KEY: Optional[str] = None
-    GEMINI_MODEL: str = "gemini-2.5-flash"
+    # Primary AI Provider Settings (Groq primary; Gemini optional fallback)
+    AI_PROVIDER: str = "groq"
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_BACKUP_MODELS: str = "openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.8-27b"
 
-    # Secondary / Fallback AI Provider Settings (Groq default secondary provider)
+    # Optional Fallback & Retry AI Provider Settings
     AI_TIMEOUT_SECONDS: float = 20.0
     AI_MAX_RETRIES: int = 2
     AI_RETRY_BASE_DELAY_SECONDS: float = 0.5
     AI_RETRY_MAX_WAIT_SECONDS: float = 4.0
-    AI_FALLBACK_PROVIDER: Optional[str] = "groq"
+    AI_FALLBACK_PROVIDER: Optional[str] = "gemini"
     AI_FALLBACK_API_KEY: Optional[str] = None
     AI_FALLBACK_MODEL: Optional[str] = None
     AI_FALLBACK_BASE_URL: Optional[str] = None
-    GROQ_API_KEY: Optional[str] = None
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
-    GROQ_BACKUP_MODELS: str = "openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.8-27b"
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: str = "gemini-2.5-flash"
 
     # Marketplace / Credits Settings
     QUERY_COST: int = 1

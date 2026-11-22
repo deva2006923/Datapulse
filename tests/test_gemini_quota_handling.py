@@ -670,4 +670,161 @@ def test_groq_model_not_found_404_auto_recovers_to_backup_model_and_strips_think
     assert res.json()["results"] == [{"item": "Laptop", "revenue": 1200}]
 
 
+def test_groq_is_default_primary_provider_and_executes_without_calling_gemini(client):
+    """
+    Verify Groq (llama-3.3-70b-versatile) is the default primary AI provider,
+    executes validated SQL against DuckDB without invoking Gemini, and applies exact credit rules.
+    """
+    from app.config import Settings
+
+    assert Settings.model_fields["AI_PROVIDER"].default == "groq"
+    assert Settings.model_fields["GROQ_MODEL"].default == "llama-3.3-70b-versatile"
+    assert Settings.model_fields["AI_FALLBACK_PROVIDER"].default == "gemini"
+
+    owner = _register(client, "gprim_owner")
+    buyer = _register(client, "gprim_buyer")
+    ds_id, table_name = _upload_public_dataset(client, owner["headers"], name="Groq Primary Sales")
+
+    owner_before = _credits(client, owner["headers"])
+    buyer_before = _credits(client, buyer["headers"])
+
+    captured = []
+
+    def _mock_groq_post(url, headers=None, json=None):
+        captured.append({"url": url, "headers": headers or {}, "json": json or {}})
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": f"SELECT item, revenue FROM {table_name} ORDER BY revenue DESC LIMIT 1"
+                    }
+                }
+            ]
+        }
+        return resp
+
+    mock_http_client = MagicMock()
+    mock_http_client.__enter__.return_value.post.side_effect = _mock_groq_post
+
+    with patch.object(settings, "AI_PROVIDER", "groq"), patch.object(
+        settings, "GROQ_API_KEY", "gsk_primary_groq_test_key_123456"
+    ), patch.object(settings, "GROQ_MODEL", "llama-3.3-70b-versatile"), patch.object(
+        settings, "AI_FALLBACK_PROVIDER", "gemini"
+    ), patch.object(settings, "GEMINI_API_KEY", "AIzaSyOptionalGeminiFallback123456"), patch(
+        "app.services.nl_query.httpx.Client", return_value=mock_http_client
+    ), patch(
+        "app.services.nl_query._call_gemini_once",
+        side_effect=AssertionError("Gemini must NOT be called when primary Groq succeeds"),
+    ):
+        res = client.post(
+            "/query",
+            headers=buyer["headers"],
+            json={"query": "Top revenue item", "dataset_id": ds_id},
+        )
+
+    assert res.status_code == 200, res.text
+    assert len(captured) == 1
+    assert captured[0]["url"] == "https://api.groq.com/openai/v1/chat/completions"
+    assert captured[0]["json"]["model"] == "llama-3.3-70b-versatile"
+    assert captured[0]["headers"]["Authorization"] == "Bearer gsk_primary_groq_test_key_123456"
+    assert res.json()["results"] == [{"item": "Laptop", "revenue": 1200}]
+    assert res.json()["credits_charged"] == 1
+    assert _credits(client, buyer["headers"]) == buyer_before - 1
+    assert _credits(client, owner["headers"]) == owner_before + 1
+
+
+def test_groq_primary_failure_falls_back_to_optional_gemini_when_configured(client):
+    """When primary Groq fails with HTTP 429 and optional GEMINI_API_KEY is set, Gemini fallback executes SQL."""
+    owner = _register(client, "g2gem_owner")
+    buyer = _register(client, "g2gem_buyer")
+    ds_id, table_name = _upload_public_dataset(client, owner["headers"], name="Groq To Gemini Sales")
+
+    owner_before = _credits(client, owner["headers"])
+    buyer_before = _credits(client, buyer["headers"])
+
+    def _mock_groq_429(url, headers=None, json=None):
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.text = '{"error":{"message":"Quota exceeded daily limit: 0"}}'
+        resp.headers = {}
+        resp.request = httpx.Request("POST", url)
+        return resp
+
+    mock_http_client = MagicMock()
+    mock_http_client.__enter__.return_value.post.side_effect = _mock_groq_429
+
+    with patch.object(settings, "AI_PROVIDER", "groq"), patch.object(
+        settings, "GROQ_API_KEY", "gsk_primary_groq_test_key_123456"
+    ), patch.object(settings, "GROQ_MODEL", "llama-3.3-70b-versatile"), patch.object(
+        settings, "AI_FALLBACK_PROVIDER", "gemini"
+    ), patch.object(settings, "GEMINI_API_KEY", "AIzaSyOptionalGeminiFallback123456"), patch.object(
+        settings, "AI_FALLBACK_API_KEY", None
+    ), patch("app.services.nl_query.httpx.Client", return_value=mock_http_client), patch(
+        "app.services.nl_query._call_gemini_once",
+        return_value=f"SELECT SUM(revenue) AS total_rev FROM {table_name}",
+    ) as gemini_mock:
+        res = client.post(
+            "/query",
+            headers=buyer["headers"],
+            json={"query": "Total revenue across all items", "dataset_id": ds_id},
+        )
+
+    assert res.status_code == 200, res.text
+    assert gemini_mock.call_count == 1
+    assert res.json()["results"] == [{"total_rev": 1950}]
+    assert res.json()["credits_charged"] == 1
+    assert _credits(client, buyer["headers"]) == buyer_before - 1
+    assert _credits(client, owner["headers"]) == owner_before + 1
+
+
+def test_groq_primary_failure_without_gemini_key_returns_safe_error_redacts_key_and_zero_credits(client, caplog):
+    """When primary Groq fails and optional Gemini is NOT configured, return safe 503 with 0 credits charged."""
+    owner = _register(client, "gnogem_owner")
+    buyer = _register(client, "gnogem_buyer")
+    ds_id, _ = _upload_public_dataset(client, owner["headers"], name="Groq No Fallback Sales")
+
+    owner_before = _credits(client, owner["headers"])
+    buyer_before = _credits(client, buyer["headers"])
+    tx_before = _tx_count([buyer["user_id"], owner["user_id"]])
+    fake_groq_key = "gsk_primary_secret_key_must_never_leak_999"
+
+    def _mock_groq_429(url, headers=None, json=None):
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.text = f'{{"error":{{"message":"Rate limit exceeded daily limit: 0 for {fake_groq_key}"}}}}'
+        resp.headers = {}
+        resp.request = httpx.Request("POST", url)
+        return resp
+
+    mock_http_client = MagicMock()
+    mock_http_client.__enter__.return_value.post.side_effect = _mock_groq_429
+
+    with caplog.at_level(logging.WARNING, logger="app.services.nl_query"), patch.object(
+        settings, "AI_PROVIDER", "groq"
+    ), patch.object(settings, "GROQ_API_KEY", fake_groq_key), patch.object(
+        settings, "AI_FALLBACK_PROVIDER", "gemini"
+    ), patch.object(settings, "GEMINI_API_KEY", None), patch.object(
+        settings, "AI_FALLBACK_API_KEY", None
+    ), patch("app.services.nl_query.httpx.Client", return_value=mock_http_client):
+        res = client.post(
+            "/query",
+            headers=buyer["headers"],
+            json={"query": "Average revenue", "dataset_id": ds_id},
+        )
+
+    assert res.status_code == 503
+    assert res.json()["detail"] == AI_QUOTA_USER_MESSAGE
+    assert fake_groq_key not in res.json()["detail"]
+    assert _credits(client, buyer["headers"]) == buyer_before
+    assert _credits(client, owner["headers"]) == owner_before
+    assert _tx_count([buyer["user_id"], owner["user_id"]]) == tx_before
+
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert fake_groq_key not in log_text
+    assert "[REDACTED" in log_text
+
+
+
 

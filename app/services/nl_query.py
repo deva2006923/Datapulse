@@ -696,21 +696,97 @@ def _invoke_provider_with_retry(
     raise AIProviderError(AI_UNAVAILABLE_USER_MESSAGE, provider=provider_name)
 
 
-def _resolve_fallback_config() -> Optional[Tuple[str, str, str, str]]:
+def _invoke_openai_compatible_with_backup_models(
+    provider_name: str,
+    api_key: str,
+    primary_model: str,
+    base_url: str,
+    system_prompt: str,
+    question: str,
+    timeout_seconds: float,
+) -> str:
     """
-    Resolve active fallback provider tuple: (provider_name, api_key, model_name, base_url).
-    Supports Groq via GROQ_API_KEY or AI_FALLBACK_API_KEY, as well as openai, openrouter,
-    openai_compatible, and secondary gemini. Returns None if no fallback key is configured.
+    Invoke an OpenAI-compatible provider (such as Groq) using `primary_model` first.
+    For Groq, automatically fails over to `settings.groq_backup_models_list` if the
+    configured model returns HTTP 404 model_not_found / decommissioned on the account.
     """
+    candidate_models = [primary_model]
+    if provider_name == "groq":
+        for backup_model in getattr(settings, "groq_backup_models_list", []):
+            if backup_model and backup_model not in candidate_models:
+                candidate_models.append(backup_model)
+
+    last_model_err: Optional[AIProviderError] = None
+    for idx, model_candidate in enumerate(candidate_models):
+        if idx > 0:
+            logger.warning(
+                "Retrying AI provider with backup model (provider=%s, model=%s).",
+                provider_name,
+                model_candidate,
+            )
+        try:
+            return _invoke_provider_with_retry(
+                provider_name=provider_name,
+                model_name=model_candidate,
+                call_fn=lambda m=model_candidate: _call_openai_compatible_once(
+                    provider_name=provider_name,
+                    api_key=api_key,
+                    model_name=m,
+                    base_url=base_url,
+                    system_prompt=system_prompt,
+                    question=question,
+                    timeout_seconds=timeout_seconds,
+                ),
+            )
+        except AIProviderModelNotFoundError as model_err:
+            last_model_err = model_err
+            continue
+
+    raise last_model_err or AIProviderError(AI_UNAVAILABLE_USER_MESSAGE, provider=provider_name)
+
+
+def _resolve_fallback_config(primary_provider: Optional[str] = None) -> Optional[Tuple[str, str, str, str]]:
+    """
+    Resolve active optional fallback provider tuple: (provider_name, api_key, model_name, base_url).
+    Supports Gemini (via GEMINI_API_KEY or AI_FALLBACK_API_KEY), Groq (via GROQ_API_KEY or
+    AI_FALLBACK_API_KEY), openai, openrouter, and openai_compatible.
+    Prevents looping back to the same primary provider unless an explicit separate AI_FALLBACK_API_KEY is set.
+    Returns None if no optional fallback key is configured.
+    """
+    primary = (primary_provider or getattr(settings, "AI_PROVIDER", None) or "groq").strip().lower()
     raw_provider = (getattr(settings, "AI_FALLBACK_PROVIDER", None) or "").strip().lower()
     generic_key = (getattr(settings, "AI_FALLBACK_API_KEY", None) or "").strip()
     groq_key = (getattr(settings, "GROQ_API_KEY", None) or "").strip()
+    gemini_key = (getattr(settings, "GEMINI_API_KEY", None) or "").strip()
 
-    # If provider wasn't explicitly named, auto-select groq whenever GROQ_API_KEY is present
-    if not raw_provider and groq_key:
-        raw_provider = "groq"
+    # Avoid falling back to the exact same provider unless an explicit separate fallback key was set
+    if raw_provider == primary and not generic_key:
+        if primary == "groq" and gemini_key:
+            raw_provider = "gemini"
+        elif primary == "gemini" and groq_key:
+            raw_provider = "groq"
+        else:
+            return None
+
+    # Auto-select complementary provider if AI_FALLBACK_PROVIDER was left empty
     if not raw_provider:
-        return None
+        if primary == "groq" and gemini_key:
+            raw_provider = "gemini"
+        elif primary == "gemini" and groq_key:
+            raw_provider = "groq"
+        else:
+            return None
+
+    if raw_provider == "gemini":
+        api_key = generic_key or gemini_key
+        if not api_key:
+            return None
+        model_name = (
+            getattr(settings, "AI_FALLBACK_MODEL", None)
+            or getattr(settings, "GEMINI_MODEL", None)
+            or "gemini-2.5-flash"
+        ).strip()
+        return ("gemini", api_key, model_name, "")
 
     if raw_provider == "groq":
         api_key = generic_key or groq_key
@@ -726,12 +802,6 @@ def _resolve_fallback_config() -> Optional[Tuple[str, str, str, str]]:
             or _OPENAI_COMPATIBLE_BASE_URLS["groq"]
         ).strip()
         return ("groq", api_key, model_name, base_url)
-
-    if raw_provider == "gemini":
-        if not generic_key:
-            return None
-        model_name = (getattr(settings, "AI_FALLBACK_MODEL", None) or "gemini-2.0-flash").strip()
-        return ("gemini", generic_key, model_name, "")
 
     if raw_provider in ("openai", "openrouter", "openai_compatible"):
         if not generic_key:
@@ -762,21 +832,15 @@ def _try_fallback_ai_provider(
     system_prompt: str,
     question: str,
     prompt: str,
+    primary_provider: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Attempt SQL generation using the configured fallback AI provider if configured.
+    Attempt SQL generation using the configured optional fallback AI provider if configured.
     Returns generated SQL if fallback succeeds, or None if no fallback provider key is configured.
     Raises AIProviderRateLimitError / AIProviderError if fallback is configured and fails.
     """
-    resolved = _resolve_fallback_config()
+    resolved = _resolve_fallback_config(primary_provider=primary_provider)
     if not resolved:
-        configured_name = (getattr(settings, "AI_FALLBACK_PROVIDER", None) or "").strip().lower()
-        if configured_name:
-            logger.warning(
-                "Fallback AI provider '%s' has no API key configured (set %s); skipping fallback.",
-                configured_name,
-                "GROQ_API_KEY or AI_FALLBACK_API_KEY" if configured_name == "groq" else "AI_FALLBACK_API_KEY",
-            )
         return None
 
     fallback_provider, fallback_key, fallback_model, base_url = resolved
@@ -784,7 +848,7 @@ def _try_fallback_ai_provider(
 
     if fallback_provider == "gemini":
         logger.info(
-            "Falling back to secondary Gemini AI provider (model=%s).",
+            "Falling back to optional Gemini AI provider (model=%s).",
             fallback_model,
         )
         return _invoke_provider_with_retry(
@@ -793,45 +857,20 @@ def _try_fallback_ai_provider(
             call_fn=lambda: _call_gemini_once(fallback_key, fallback_model, prompt),
         )
 
-    candidate_models = [fallback_model]
-    if fallback_provider == "groq":
-        for backup_model in getattr(settings, "groq_backup_models_list", []):
-            if backup_model and backup_model not in candidate_models:
-                candidate_models.append(backup_model)
-
-    last_model_err: Optional[AIProviderError] = None
-    for idx, model_candidate in enumerate(candidate_models):
-        if idx == 0:
-            logger.info(
-                "Falling back to configured AI provider (provider=%s, model=%s).",
-                fallback_provider,
-                model_candidate,
-            )
-        else:
-            logger.warning(
-                "Retrying fallback AI provider with backup model (provider=%s, model=%s).",
-                fallback_provider,
-                model_candidate,
-            )
-        try:
-            return _invoke_provider_with_retry(
-                provider_name=fallback_provider,
-                model_name=model_candidate,
-                call_fn=lambda m=model_candidate: _call_openai_compatible_once(
-                    provider_name=fallback_provider,
-                    api_key=fallback_key,
-                    model_name=m,
-                    base_url=base_url,
-                    system_prompt=system_prompt,
-                    question=question,
-                    timeout_seconds=timeout_seconds,
-                ),
-            )
-        except AIProviderModelNotFoundError as model_err:
-            last_model_err = model_err
-            continue
-
-    raise last_model_err or AIProviderError(AI_UNAVAILABLE_USER_MESSAGE, provider=fallback_provider)
+    logger.info(
+        "Falling back to configured AI provider (provider=%s, model=%s).",
+        fallback_provider,
+        fallback_model,
+    )
+    return _invoke_openai_compatible_with_backup_models(
+        provider_name=fallback_provider,
+        api_key=fallback_key,
+        primary_model=fallback_model,
+        base_url=base_url,
+        system_prompt=system_prompt,
+        question=question,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def generate_sql(
@@ -841,9 +880,10 @@ def generate_sql(
     domain: str = "general"
 ) -> str:
     """
-    Generate DuckDB SQL from natural language using the configured AI provider.
-    Supports Google Gemini (via google-genai), bounded exponential backoff for transient errors,
-    and automatic failover to a configurable fallback AI provider. Never fabricates SQL or results.
+    Generate DuckDB SQL from natural language using the configured primary AI provider (Groq by default).
+    Supports Groq (llama-3.3-70b-versatile + backup models), optional fallback provider (Gemini if configured),
+    bounded exponential backoff for transient errors, and secret-redacted logging.
+    Never fabricates SQL or results.
     """
     if not question or not question.strip():
         raise EmptyQueryError("Natural language question cannot be empty")
@@ -852,7 +892,7 @@ def generate_sql(
     if _mock_ai_generator is not None:
         return _mock_ai_generator(question, table_name, columns_with_types)
 
-    provider = (settings.AI_PROVIDER or "gemini").strip().lower()
+    provider = (settings.AI_PROVIDER or "groq").strip().lower()
     columns_desc = "\n".join([f"- {col}: {col_type}" for col, col_type in columns_with_types])
 
     system_prompt = (
@@ -874,11 +914,62 @@ def generate_sql(
     )
     prompt = f"{system_prompt}\n\n<user_question>\n{question}\n</user_question>\n\nSQL:"
 
+    if provider == "groq":
+        groq_api_key = (getattr(settings, "GROQ_API_KEY", None) or "").strip()
+        if not groq_api_key:
+            # Try optional configured fallback provider (e.g., Gemini if GEMINI_API_KEY is configured)
+            fallback_sql = _try_fallback_ai_provider(
+                system_prompt, question, prompt, primary_provider="groq"
+            )
+            if fallback_sql:
+                return fallback_sql
+            # Lightweight local dev/CI rule matching ONLY when no AI API key is configured at all
+            rule_sql = fallback_rule_sql_generator(question, table_name, columns_with_types)
+            if rule_sql:
+                return rule_sql
+            raise AIProviderError(
+                "Groq API key is not configured. Set GROQ_API_KEY in environment variables."
+            )
+
+        groq_model = (getattr(settings, "GROQ_MODEL", None) or _OPENAI_COMPATIBLE_DEFAULT_MODELS["groq"]).strip()
+        groq_base_url = _OPENAI_COMPATIBLE_BASE_URLS["groq"]
+        timeout_seconds = max(1.0, float(getattr(settings, "AI_TIMEOUT_SECONDS", 20.0)))
+        try:
+            return _invoke_openai_compatible_with_backup_models(
+                provider_name="groq",
+                api_key=groq_api_key,
+                primary_model=groq_model,
+                base_url=groq_base_url,
+                system_prompt=system_prompt,
+                question=question,
+                timeout_seconds=timeout_seconds,
+            )
+        except AIProviderError as primary_err:
+            # Attempt optional configured fallback provider (e.g., Gemini) if available; never fabricate SQL
+            try:
+                fallback_sql = _try_fallback_ai_provider(
+                    system_prompt, question, prompt, primary_provider="groq"
+                )
+                if fallback_sql:
+                    return fallback_sql
+            except AIProviderError as fallback_err:
+                logger.error(
+                    "Fallback AI provider also failed after primary Groq error (primary_rate_limit=%s, fallback_rate_limit=%s).",
+                    primary_err.is_rate_limit,
+                    fallback_err.is_rate_limit,
+                )
+                if primary_err.is_rate_limit or fallback_err.is_rate_limit:
+                    raise AIProviderRateLimitError(AI_QUOTA_USER_MESSAGE, provider="fallback")
+                raise fallback_err
+            raise primary_err
+
     if provider == "gemini":
         gemini_api_key = (settings.GEMINI_API_KEY or "").strip()
         if not gemini_api_key:
             # Try configured fallback AI provider first if available
-            fallback_sql = _try_fallback_ai_provider(system_prompt, question, prompt)
+            fallback_sql = _try_fallback_ai_provider(
+                system_prompt, question, prompt, primary_provider="gemini"
+            )
             if fallback_sql:
                 return fallback_sql
             # Lightweight local dev/CI rule matching ONLY when no AI API key is configured at all
@@ -899,7 +990,9 @@ def generate_sql(
         except AIProviderError as primary_err:
             # Attempt configured fallback AI provider if available (never fabricate SQL)
             try:
-                fallback_sql = _try_fallback_ai_provider(system_prompt, question, prompt)
+                fallback_sql = _try_fallback_ai_provider(
+                    system_prompt, question, prompt, primary_provider="gemini"
+                )
                 if fallback_sql:
                     return fallback_sql
             except AIProviderError as fallback_err:
@@ -913,12 +1006,8 @@ def generate_sql(
                 raise fallback_err
             raise primary_err
 
-    if provider in ("openai", "openrouter", "groq", "openai_compatible"):
-        api_key = (
-            (getattr(settings, "GROQ_API_KEY", None) or "").strip()
-            if provider == "groq"
-            else ""
-        ) or (getattr(settings, "AI_FALLBACK_API_KEY", None) or "").strip()
+    if provider in ("openai", "openrouter", "openai_compatible"):
+        api_key = (getattr(settings, "AI_FALLBACK_API_KEY", None) or "").strip()
         base_url = (
             getattr(settings, "AI_FALLBACK_BASE_URL", None)
             or _OPENAI_COMPATIBLE_BASE_URLS.get(provider)
@@ -926,7 +1015,6 @@ def generate_sql(
         ).strip()
         model_name = (
             getattr(settings, "AI_FALLBACK_MODEL", None)
-            or (getattr(settings, "GROQ_MODEL", None) if provider == "groq" else None)
             or _OPENAI_COMPATIBLE_DEFAULT_MODELS.get(provider)
             or "gpt-4o-mini"
         ).strip()
