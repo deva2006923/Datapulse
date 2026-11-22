@@ -504,7 +504,7 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
         conn.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to record marketplace query transaction: {str(e)}"
+            detail="Failed to record marketplace query transaction."
         )
 
     return QueryResponse(

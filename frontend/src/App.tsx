@@ -792,25 +792,37 @@ export default function App() {
     setCurrentRoute('dataset-detail');
   };
 
-  // Wallet Redemption Handler (Min 500 cr, Multiples of 100, 100 cr = Rs 10)
-  const handleRedeemCredits = (amount: number, rupeeValue: number) => {
-    if (effectiveUser.credits < amount || amount < 500 || amount % 100 !== 0) return;
-
-    const tx: WalletTransaction = {
-      id: `tx_red_${Date.now()}`,
-      userId: effectiveUser.id,
-      type: 'REDEMPTION',
-      amount: -amount,
-      description: `Simulated Cash Payout: Redeemed ${amount} credits for ₹${rupeeValue.toFixed(2)}`,
-      timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      rupeeValue,
+  // Listen for mid-session 401 token expiration events from API client
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleSessionExpired = () => {
+      setCurrentUser(null);
+      setIsAuthenticated(false);
+      setDatasets([]);
+      setSelectedDatasetId('');
+      setTransactions([]);
+      setQueryHistory([]);
+      setCurrentRoute('login');
+      addToast(
+        'SESSION_EXPIRED',
+        'Your session has expired. Please sign in again.',
+        'amber'
+      );
     };
-    const nextTransactions = [tx, ...transactions];
-    setTransactions(nextTransactions);
+    window.addEventListener('datapulse:session-expired', handleSessionExpired);
+    return () => window.removeEventListener('datapulse:session-expired', handleSessionExpired);
+  }, []);
 
-    setCurrentUser((prev) =>
-      prev ? { ...prev, credits: Math.max(0, prev.credits - amount) } : null
-    );
+  // Wallet Redemption Callback (WalletView already persisted redemption & synced /auth/me)
+  const handleRedeemCredits = (amount: number, rupeeValue: number) => {
+    api.credits
+      .getTransactions()
+      .then((txList) => {
+        if (txList) {
+          setTransactions(txList.map(transactionItemToWalletTransaction));
+        }
+      })
+      .catch(() => {});
 
     addToast(
       'REDEMPTION_PROCESSED',

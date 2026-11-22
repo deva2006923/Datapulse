@@ -16,7 +16,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { PageRoute, UserAccount } from '../types';
-import { DEMO_ACCOUNTS } from '../services/api';
+import { DEMO_ACCOUNTS, DEMO_ACCOUNTS_ENABLED } from '../services/api';
 
 interface NavbarProps {
   currentRoute: PageRoute;
@@ -152,40 +152,42 @@ export const Navbar: React.FC<NavbarProps> = ({
                       </div>
                     </div>
 
-                    <div className="py-1">
-                      <span className="px-2 text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
-                        Quick Switch Demo Account (Dev)
-                      </span>
-                      {Object.values(DEMO_ACCOUNTS).map((demo) => {
-                        const isCurrent =
-                          currentUser.email.toLowerCase() === demo.email.toLowerCase();
-                        return (
-                          <button
-                            key={demo.key}
-                            onClick={() => {
-                              onSwitchUser(demo.key);
-                              setShowUserDropdown(false);
-                            }}
-                            className={`w-full text-left px-2 py-1.5 rounded-lg flex items-center justify-between transition-colors cursor-pointer ${
-                              isCurrent
-                                ? 'bg-indigo-50 font-bold text-indigo-700'
-                                : 'text-slate-700 hover:bg-slate-50'
-                            }`}
-                          >
-                            <span className="truncate">{demo.full_name}</span>
-                            {isCurrent ? (
-                              <span className="font-mono text-[11px] text-emerald-600 shrink-0 font-semibold">
-                                {currentUser.credits} cr
-                              </span>
-                            ) : (
-                              <span className="text-[10px] text-slate-400 font-mono">
-                                Switch
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
+                    {DEMO_ACCOUNTS_ENABLED && (
+                      <div className="py-1">
+                        <span className="px-2 text-[10px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
+                          Quick Switch Demo Account (Dev)
+                        </span>
+                        {Object.values(DEMO_ACCOUNTS).map((demo) => {
+                          const isCurrent =
+                            currentUser.email.toLowerCase() === demo.email.toLowerCase();
+                          return (
+                            <button
+                              key={demo.key}
+                              onClick={() => {
+                                onSwitchUser(demo.key);
+                                setShowUserDropdown(false);
+                              }}
+                              className={`w-full text-left px-2 py-1.5 rounded-lg flex items-center justify-between transition-colors cursor-pointer ${
+                                isCurrent
+                                  ? 'bg-indigo-50 font-bold text-indigo-700'
+                                  : 'text-slate-700 hover:bg-slate-50'
+                              }`}
+                            >
+                              <span className="truncate">{demo.full_name}</span>
+                              {isCurrent ? (
+                                <span className="font-mono text-[11px] text-emerald-600 shrink-0 font-semibold">
+                                  {currentUser.credits} cr
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-slate-400 font-mono">
+                                  Switch
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
 
                     <div className="pt-1 mt-1 border-t border-slate-100 space-y-0.5">
                       <button

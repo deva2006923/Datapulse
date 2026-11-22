@@ -344,9 +344,9 @@ describe('Phase 3: Dataset Search and Discovery Integration', () => {
     authToken = res.access_token;
     setStoredToken(authToken);
 
-    // Ensure at least one dataset exists
-    const unique = Date.now();
-    const csvContent = 'sensor_id,temperature,humidity,status\nS-1,22.4,55.1,OK\nS-2,28.9,65.3,WARN\nS-3,19.2,48.0,OK';
+    // Ensure at least one unique dataset exists for this test case
+    const unique = `${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const csvContent = `sensor_id,temperature,humidity,status\nS-${unique}-1,22.4,55.1,OK\nS-${unique}-2,28.9,65.3,WARN\nS-${unique}-3,19.2,48.0,OK`;
     const file = new File([csvContent], `iot_sensors_${unique}.csv`, { type: 'text/csv' });
     testDatasetName = `IoT Grid Sensor Network ${unique}`;
     const uploaded = await api.datasets.upload(file, 'technology', testDatasetName);
@@ -425,8 +425,9 @@ describe('Phase 4: Natural-Language Query and Actual DuckDB Results', () => {
     const res = await api.auth.demoLogin('demo-user');
     setStoredToken(res.access_token);
 
-    const csvContent = 'device,metric,value\nD-10,cpu,45\nD-20,ram,78\nD-30,disk,23\nD-40,cpu,89';
-    const file = new File([csvContent], `metrics_${Date.now()}.csv`, { type: 'text/csv' });
+    const unique = `${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const csvContent = `device,metric,value\nD-${unique}-10,cpu,45\nD-${unique}-20,ram,78\nD-${unique}-30,disk,23\nD-${unique}-40,cpu,89`;
+    const file = new File([csvContent], `metrics_${unique}.csv`, { type: 'text/csv' });
     const uploaded = await api.datasets.upload(file, 'technology', 'System Performance Metrics');
     testDatasetId = uploaded.id;
   });
@@ -832,16 +833,24 @@ describe('Dynamic Reputation, Dataset Unlock Pricing, and Reward Endpoints', () 
 
   it('submits dataset improvement via api.datasets.improve', async () => {
     setStoredToken(userToken);
-    const listRes = await api.datasets.list();
-    const targetDataset = listRes.datasets[0];
+    const unique = `${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const owned = await api.datasets.upload(
+      new File(
+        [`col_a,col_b\n${unique},10\nrow2,20\n`],
+        `improve_${unique}.csv`,
+        { type: 'text/csv' }
+      ),
+      'technology',
+      `Owned Dataset ${unique}`
+    );
 
-    const improveRes = await api.datasets.improve(targetDataset.id, {
+    const improveRes = await api.datasets.improve(owned.id, {
       new_quality_score: 98.0,
       new_relevance_score: 98.0,
       changes_summary: 'Comprehensive frontend unit test improvements and schema aliases',
     });
 
-    expect(improveRes.dataset_id).toBe(targetDataset.id);
+    expect(improveRes.dataset_id).toBe(owned.id);
     expect(improveRes.version).toBeDefined();
     expect(typeof improveRes.improvement_credits_awarded).toBe('number');
     expect(typeof improveRes.new_reputation_score).toBe('number');

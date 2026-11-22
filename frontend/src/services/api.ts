@@ -180,9 +180,15 @@ async function request<T>(
   }
 
   if (!response.ok) {
-    // If token expired or unauthorized on authenticated endpoints
-    if (response.status === 401 && path.includes('/auth/me')) {
+    // Clear expired/revoked bearer token on any authenticated endpoint returning 401
+    const isAuthCredentialEndpoint =
+      normalizedPath.startsWith('/auth/login') || normalizedPath.startsWith('/auth/register');
+    if (response.status === 401 && !isAuthCredentialEndpoint) {
+      const hadToken = !!getStoredToken();
       clearStoredToken();
+      if (hadToken && typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('datapulse:session-expired'));
+      }
     }
 
     const message = parseErrorMessage(response.status, responseData);
@@ -191,6 +197,10 @@ async function request<T>(
 
   return responseData as T;
 }
+
+// Restrict dev demo account quick-switcher in production builds unless explicitly opted in
+export const DEMO_ACCOUNTS_ENABLED: boolean =
+  !import.meta.env.PROD || import.meta.env.VITE_ENABLE_DEMO_ACCOUNTS === 'true';
 
 // Predefined demo credentials for Instant Demo Switcher buttons
 export interface DemoAccountDefinition {
@@ -260,7 +270,18 @@ export const api = {
     },
 
     logout(): void {
+      const token = getStoredToken();
       clearStoredToken();
+      if (token && API_BASE_URL) {
+        // Best-effort server-side token revocation (non-blocking)
+        fetch(`${API_BASE_URL}/auth/logout`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+        }).catch(() => {});
+      }
     },
 
     /**

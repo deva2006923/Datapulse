@@ -11,7 +11,7 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { UserAccount, AppDataset, QueryHistoryItem } from '../types';
-import { DEMO_ACCOUNTS } from '../services/api';
+import { DEMO_ACCOUNTS, DEMO_ACCOUNTS_ENABLED } from '../services/api';
 
 interface ProfileViewProps {
   currentUser: UserAccount;
@@ -33,10 +33,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   );
   const userQueries = queryHistory.filter((q) => q.userId === currentUser.id);
 
-  // Compute royalties
+  // Compute royalties using each dataset's actual dynamic unlock price
   const totalRoyalties = contributedDatasets.reduce((acc, d) => {
     const unlocks = d.unlockedBy.filter((uid) => uid !== d.authorId).length;
-    return acc + unlocks * 20;
+    return acc + unlocks * (d.unlockPrice ?? d.cost ?? 10);
   }, 0);
 
   return (
@@ -108,7 +108,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           <div className="text-2xl font-black font-mono text-indigo-600">
             +{totalRoyalties} cr
           </div>
-          <span className="text-[10px] text-slate-400">+20 per unlock</span>
+          <span className="text-[10px] text-slate-400">From dataset unlocks</span>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
@@ -120,53 +120,55 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </div>
       </div>
 
-      {/* Switch Active User Profile */}
-      <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-4">
-        <div>
-          <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wide">
-            Switch Demo Account
-          </h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Switch sessions seamlessly to verify contributor royalties, analyst permissions, and balance updates.
-          </p>
-        </div>
+      {/* Switch Active User Profile (Development only; hidden in production builds) */}
+      {DEMO_ACCOUNTS_ENABLED && (
+        <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-4">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wide">
+              Switch Demo Account
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Switch sessions seamlessly to verify contributor royalties, analyst permissions, and balance updates.
+            </p>
+          </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {Object.values(DEMO_ACCOUNTS).map((demo) => {
-            const isCurrent =
-              currentUser.email.toLowerCase() === demo.email.toLowerCase();
-            return (
-              <button
-                key={demo.key}
-                onClick={() => onSwitchUser(demo.key)}
-                className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
-                  isCurrent
-                    ? 'bg-indigo-50/60 border-indigo-300 ring-2 ring-indigo-500/20'
-                    : 'bg-slate-50 border-slate-200 hover:bg-slate-100/60'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-bold text-slate-900">{demo.full_name}</span>
-                  {isCurrent && (
-                    <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded">
-                      Active
-                    </span>
-                  )}
-                </div>
-                <div className="text-[11px] text-slate-500 font-mono">{demo.email}</div>
-                <div className="mt-2 pt-2 border-t border-slate-200/60 flex items-center justify-between text-xs font-mono">
-                  <span className="text-slate-500">{demo.role}</span>
-                  {isCurrent ? (
-                    <span className="font-bold text-emerald-600">{currentUser.credits} cr</span>
-                  ) : (
-                    <span className="text-slate-400 font-medium text-[11px]">Switch session</span>
-                  )}
-                </div>
-              </button>
-            );
-          })}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {Object.values(DEMO_ACCOUNTS).map((demo) => {
+              const isCurrent =
+                currentUser.email.toLowerCase() === demo.email.toLowerCase();
+              return (
+                <button
+                  key={demo.key}
+                  onClick={() => onSwitchUser(demo.key)}
+                  className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
+                    isCurrent
+                      ? 'bg-indigo-50/60 border-indigo-300 ring-2 ring-indigo-500/20'
+                      : 'bg-slate-50 border-slate-200 hover:bg-slate-100/60'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold text-slate-900">{demo.full_name}</span>
+                    {isCurrent && (
+                      <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded">
+                        Active
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-500 font-mono">{demo.email}</div>
+                  <div className="mt-2 pt-2 border-t border-slate-200/60 flex items-center justify-between text-xs font-mono">
+                    <span className="text-slate-500">{demo.role}</span>
+                    {isCurrent ? (
+                      <span className="font-bold text-emerald-600">{currentUser.credits} cr</span>
+                    ) : (
+                      <span className="text-slate-400 font-medium text-[11px]">Switch session</span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

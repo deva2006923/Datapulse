@@ -10,7 +10,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { PageRoute, BackendUserResponse } from '../types';
-import { api, ApiError, DEMO_ACCOUNTS } from '../services/api';
+import { api, ApiError, DEMO_ACCOUNTS, DEMO_ACCOUNTS_ENABLED } from '../services/api';
 
 interface LoginRegisterViewProps {
   onLoginSuccess: (
@@ -127,28 +127,30 @@ export const LoginRegisterView: React.FC<LoginRegisterViewProps> = ({
 
   return (
     <div className="max-w-md mx-auto my-8 space-y-6">
-      {/* Quick Demo Switcher Buttons (Required in checklist) */}
-      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-3">
-        <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 block">
-          Instant Demo Access
-        </span>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-          {Object.values(DEMO_ACCOUNTS).map((demo) => (
-            <button
-              key={demo.key}
-              type="button"
-              disabled={isLoading}
-              onClick={() => handleDemoClick(demo.key)}
-              className="px-3 py-2 rounded-lg bg-indigo-50/70 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 text-xs font-semibold border border-indigo-200 transition-colors cursor-pointer text-center"
-            >
-              {demo.full_name}
-              <span className="block text-[10px] font-normal text-indigo-600 font-mono">
-                {demo.role}
-              </span>
-            </button>
-          ))}
+      {/* Quick Demo Switcher Buttons (Development only; hidden in production builds) */}
+      {DEMO_ACCOUNTS_ENABLED && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-3">
+          <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 block">
+            Instant Demo Access
+          </span>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {Object.values(DEMO_ACCOUNTS).map((demo) => (
+              <button
+                key={demo.key}
+                type="button"
+                disabled={isLoading}
+                onClick={() => handleDemoClick(demo.key)}
+                className="px-3 py-2 rounded-lg bg-indigo-50/70 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 text-xs font-semibold border border-indigo-200 transition-colors cursor-pointer text-center"
+              >
+                {demo.full_name}
+                <span className="block text-[10px] font-normal text-indigo-600 font-mono">
+                  {demo.role}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Main Form Card */}
       <div className="bg-white border border-slate-200 rounded-xl p-6 sm:p-8 shadow-sm space-y-6">
