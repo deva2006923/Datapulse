@@ -334,11 +334,13 @@ export const api = {
      * - file: File (.csv)
      * - domain: string (optional, defaults to "general")
      * - name: string (optional, defaults to filename without extension)
+     * - visibility: 'public' | 'private' (optional, defaults to "public")
      */
     async upload(
       fileOrFormData: File | FormData,
       domain: string = 'general',
-      name?: string
+      name?: string,
+      visibility: 'public' | 'private' = 'public'
     ): Promise<BackendDatasetDetail> {
       let body: FormData;
       if (fileOrFormData instanceof FormData) {
@@ -351,6 +353,9 @@ export const api = {
         }
         if (name) {
           body.append('name', name);
+        }
+        if (visibility) {
+          body.append('visibility', visibility);
         }
       }
 
@@ -417,12 +422,35 @@ export const api = {
     },
 
     /**
-     * Lists datasets from GET /datasets, optionally filtered by domain.
+     * Lists datasets from GET /datasets, optionally filtered by domain and library source.
      */
-    async list(domain?: string): Promise<DatasetListResponse> {
-      const queryParam = domain && domain !== 'All' ? `?domain=${encodeURIComponent(domain.toLowerCase())}` : '';
-      return request<DatasetListResponse>(`/datasets${queryParam}`, {
+    async list(
+      domain?: string,
+      source?: 'all' | 'mine' | 'curated' | 'community'
+    ): Promise<DatasetListResponse> {
+      const params = new URLSearchParams();
+      if (domain && domain !== 'All') {
+        params.set('domain', domain);
+      }
+      if (source && source !== 'all') {
+        params.set('source', source);
+      }
+      const qs = params.toString();
+      return request<DatasetListResponse>(`/datasets${qs ? `?${qs}` : ''}`, {
         method: 'GET',
+      });
+    },
+
+    /**
+     * Updates visibility ('public' | 'private') for an owner's community dataset.
+     */
+    async updateVisibility(
+      datasetId: string,
+      visibility: 'public' | 'private'
+    ): Promise<BackendDatasetDetail> {
+      return request<BackendDatasetDetail>(`/datasets/${datasetId}/visibility`, {
+        method: 'PATCH',
+        body: JSON.stringify({ visibility }),
       });
     },
 

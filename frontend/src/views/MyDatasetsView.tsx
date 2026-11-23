@@ -33,9 +33,11 @@ export const MyDatasetsView: React.FC<MyDatasetsViewProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'contributed' | 'accessed'>('contributed');
 
-  const contributed = datasets.filter((d) => d.authorId === currentUser.id);
+  const contributed = datasets.filter(
+    (d) => d.authorId === currentUser.id && !d.isCurated
+  );
   const accessed = datasets.filter(
-    (d) => d.unlockedBy.includes(currentUser.id) && d.authorId !== currentUser.id
+    (d) => !d.isCurated && d.unlockedBy.includes(currentUser.id) && d.authorId !== currentUser.id
   );
 
   return (
@@ -117,7 +119,8 @@ export const MyDatasetsView: React.FC<MyDatasetsViewProps> = ({
             <div className="grid grid-cols-1 gap-4">
               {contributed.map((ds) => {
                 const totalUnlocks = ds.unlockedBy.filter((uid) => uid !== ds.authorId).length;
-                const royaltiesEarned = totalUnlocks * 20;
+                const unitUnlockPrice = ds.unlockPrice ?? ds.cost ?? 10;
+                const royaltiesEarned = totalUnlocks * unitUnlockPrice;
 
                 return (
                   <div
@@ -136,6 +139,15 @@ export const MyDatasetsView: React.FC<MyDatasetsViewProps> = ({
                           <span className="px-2 py-0.5 rounded text-[11px] font-mono text-slate-500 bg-slate-50 border border-slate-200">
                             {ds.currentVersion}
                           </span>
+                          {ds.visibility === 'private' ? (
+                            <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+                              Private
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              Public
+                            </span>
+                          )}
                         </div>
                         <h3 className="text-base font-bold text-slate-900">{ds.title}</h3>
                         <span className="text-xs font-mono text-slate-400 block">{ds.name}</span>
@@ -151,7 +163,7 @@ export const MyDatasetsView: React.FC<MyDatasetsViewProps> = ({
                           +{royaltiesEarned} cr
                         </div>
                         <span className="text-[10px] text-emerald-700 block">
-                          {totalUnlocks} unlocks (+20 cr each)
+                          {totalUnlocks} unlock{totalUnlocks === 1 ? '' : 's'} ({unitUnlockPrice} cr each)
                         </span>
                       </div>
                     </div>

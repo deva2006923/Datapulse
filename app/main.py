@@ -7,8 +7,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
-from app.database import init_db
+from app.database import get_db_backend, init_db
 from app.services.admin_bootstrap import ensure_default_admin
+from app.services.curated_library import sync_curated_manifest
 from app.services.storage import init_storage
 from app.routers import health, auth, datasets, query, credits, user, admin
 
@@ -55,13 +56,19 @@ _INSECURE_SECRET_DEFAULTS = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize persistent SQLite & DuckDB storage without overwriting existing data
-    logger.info("Initializing DataPulse SQLite Database...")
+    # Startup: Initialize metadata DB (PostgreSQL in production, SQLite locally) & DuckDB analytical cache
+    logger.info("Initializing DataPulse metadata database (backend=%s)...", get_db_backend())
     init_db()
     logger.info("Initializing DataPulse Analytical Storage...")
     init_storage()
     logger.info("Verifying default administrator account...")
     ensure_default_admin()
+    if getattr(settings, "CURATED_SYNC_ON_STARTUP", True):
+        logger.info("Synchronizing curated public dataset manifest metadata...")
+        try:
+            sync_curated_manifest()
+        except Exception:
+            logger.exception("Curated manifest synchronization failed during startup; continuing startup.")
 
     if settings.is_production:
         if not settings.SECRET_KEY or settings.SECRET_KEY.strip() in _INSECURE_SECRET_DEFAULTS or len(settings.SECRET_KEY.strip()) < 32:
@@ -69,10 +76,24 @@ async def lifespan(app: FastAPI):
                 "SECURITY WARNING: SECRET_KEY is using a weak or default value in production. "
                 "Generate a >=32-byte random secret in your hosting environment."
             )
-        if not settings.GEMINI_API_KEY:
+        primary_provider = (settings.AI_PROVIDER or "groq").strip().lower()
+        primary_key_set = bool((settings.GROQ_API_KEY or "").strip()) if primary_provider == "groq" else bool((settings.GEMINI_API_KEY or "").strip())
+        if not primary_key_set:
             logger.warning(
-                "CONFIGURATION WARNING: GEMINI_API_KEY is not set; natural-language SQL generation will use limited rule fallback."
+                "CONFIGURATION WARNING: Primary AI provider '%s' API key is not set; natural-language SQL generation will rely on optional fallback or limited rule fallback.",
+                primary_provider,
             )
+
+    from app.services.nl_query import _resolve_fallback_config
+    primary_provider = (settings.AI_PROVIDER or "groq").strip().lower()
+    primary_model = settings.GROQ_MODEL if primary_provider == "groq" else settings.GEMINI_MODEL
+    logger.info("Primary AI provider configured: %s (model=%s)", primary_provider, primary_model)
+    fallback_cfg = _resolve_fallback_config(primary_provider=primary_provider)
+    if fallback_cfg:
+        fb_provider, _, fb_model, _ = fallback_cfg
+        logger.info("Optional fallback AI provider armed: %s (model=%s)", fb_provider, fb_model)
+    else:
+        logger.info("Optional fallback AI provider not configured.")
 
     logger.info(
         "DataPulse Backend initialized. Version: %s, Environment: %s",
@@ -101,18 +122,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": "Internal server error"},
     )
-
-
-# CORS configuration: allow explicit configured origins (and optional regex when configured)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins_list,
-    allow_origin_regex=settings.CORS_ORIGIN_REGEX if settings.CORS_ORIGIN_REGEX else None,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition"],
-)
 
 
 @app.middleware("http")
@@ -150,6 +159,21 @@ async def security_and_rate_limit_middleware(request: Request, call_next):
         response.headers.setdefault("Cache-Control", "no-store")
 
     return response
+
+
+# Register CORSMiddleware LAST so it runs as the OUTERMOST middleware (LIFO order in Starlette/FastAPI).
+# This ensures OPTIONS preflight requests are handled before rate-limiting/routing and that all
+# responses (including 4xx/429/5xx) receive proper CORS headers for allowed explicit origins.
+# Never use wildcard '*' origins when allow_credentials=True.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_origin_regex=settings.CORS_ORIGIN_REGEX if settings.CORS_ORIGIN_REGEX else None,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
+    expose_headers=["Content-Disposition"],
+)
 
 # Include Routers (all using TrailingSlashRouter for seamless slash/no-slash matching)
 app.include_router(health.router)

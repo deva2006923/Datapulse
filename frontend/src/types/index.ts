@@ -63,6 +63,17 @@ export interface BackendDatasetDetail {
   domain_relevance_score?: number;
   overall_score?: number;
   credits_awarded?: number;
+  is_curated?: boolean;
+  dataset_type?: 'curated' | 'community' | string;
+  visibility?: 'public' | 'private' | string;
+  source_name?: string | null;
+  source_url?: string | null;
+  license?: string | null;
+  license_url?: string | null;
+  retrieved_at?: string | null;
+  ingestion_status?: string | null;
+  sha256_checksum?: string | null;
+  source_version?: string | null;
 }
 
 
@@ -101,12 +112,27 @@ export interface SearchRequest {
 
 export interface SearchItem {
   dataset_id: string;
+  user_id?: string | null;
   name: string;
+  filename?: string | null;
   domain: string;
   score: number;
   summary: string;
   rows_count: number;
+  columns_count?: number | null;
   unlock_price?: number;
+  unlocked_by?: string[];
+  quality_score?: number | null;
+  domain_relevance_score?: number | null;
+  overall_score?: number | null;
+  storage_available?: boolean | null;
+  availability?: string | null;
+  is_curated?: boolean;
+  dataset_type?: 'curated' | 'community' | string;
+  visibility?: 'public' | 'private' | string;
+  license?: string | null;
+  source_name?: string | null;
+  created_at?: string | null;
 }
 
 export interface SearchResponse {
@@ -260,6 +286,16 @@ export interface AppDataset {
   availability?: string;
   sampleQueries: string[];
   matchScore?: number;
+  isCurated?: boolean;
+  datasetType?: 'curated' | 'community';
+  visibility?: 'public' | 'private';
+  sourceName?: string;
+  sourceUrl?: string;
+  licenseUrl?: string;
+  retrievedAt?: string;
+  ingestionStatus?: string;
+  sha256Checksum?: string;
+  sourceVersion?: string;
 }
 
 

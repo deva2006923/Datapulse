@@ -1,0 +1,2 @@
+# Preserve exact raw bytes for SHA-256 verified packaged curated CSV assets across all operating systems.
+data/curated/*.csv binary

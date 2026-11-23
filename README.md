@@ -10,10 +10,10 @@ DataPulse is an intelligent data contribution, automated quality evaluation, and
 - **Flexible Embeddings & Relevance**: Configurable `EMBEDDINGS_ENABLED` feature flag with lazy-loaded `sentence-transformers` and automatic TF-IDF/rule-based fallbacks.
 - **Automated CSV Evaluation**: Evaluates schema fidelity, completeness, and domain relevance to award user credits.
 - **Credit Redemption**: Allows users to redeem earned credits for cash payouts with schema and balance validation.
-- **OpenAPI & Contract Documentation**: Automated export script generating `openapi.json` and human-readable `docs/API_CONTRACT.md`.
+- **OpenAPI & Contract Documentation**: Automated export script generating `openapi.json` and
+ human-readable `docs/API_CONTRACT.md`.
 
 ---
-
 ## Quickstart
 
 ### 1. Installation

@@ -1,15 +1,45 @@
+# Version control & local environments
 .git
+.gitignore
 .venv
 venv
 __pycache__
 *.pyc
 .pytest_cache
+
+# Secrets & local databases (NEVER bundle into deployment artifact)
 .env
+.env.*
+!.env.example
 *.db
+*.db-wal
+*.db-shm
+*.sqlite
 *.sqlite3
 *.duckdb
 *.duckdb.wal
+
+# Local runtime storage, backups, archives, logs & generated reports
 storage
+backups
+*.zip
+*.tar.gz
+*.bak
+*.backup
+*.backup.*
+*.log
+*_report.json
+curated_*_report.json
+
+# Synthetic E2E test CSVs (must never be deployed as marketplace datasets)
+data/curated/ds_cur_ing_e2e_*.csv
+data/curated/*e2e*.csv
+data/curated/*synthetic*.csv
+
+# Frontend, tests, docs & CLI utilities (not required in backend runtime container)
 frontend
 tests
 docs
+scripts
+README.md
+render.yaml

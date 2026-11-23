@@ -1,10 +1,9 @@
 import logging
-import sqlite3
 import uuid
 import datetime
 from typing import Optional, Dict, Any
 from app.config import settings
-from app.database import get_db_connection
+from app.database import DB_INTEGRITY_ERRORS, get_db_connection
 from app.auth import hash_password
 from app.services.reputation import DEFAULT_INITIAL_REPUTATION
 
@@ -243,7 +242,7 @@ def ensure_default_admin(
             "email": target_email,
             "is_admin": True,
         }
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERRORS:
         # Concurrent startup race: row was created by another startup sequence; ensure is_admin = 1 only
         conn.rollback()
         cursor.execute(

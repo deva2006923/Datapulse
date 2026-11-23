@@ -588,9 +588,12 @@ export default function App() {
       });
 
       if (charged === 0) {
+        const freeReason = dataset.isCurated
+          ? '0 credits - Free Curated Public Library access'
+          : '0 credits - Free own-dataset access';
         addToast(
           'QUERY_EXECUTED',
-          `Query executed in ${execTime}ms. (0 credits - Free own-dataset access)`,
+          `Query executed in ${execTime}ms. (${freeReason})`,
           'emerald'
         );
       } else {
@@ -608,6 +611,10 @@ export default function App() {
       if (error.status === 402) {
         errorType = 'INSUFFICIENT_CREDITS';
         errorMessage = error.message || 'Insufficient credit balance to execute query.';
+      } else if (error.status === 403) {
+        errorType = 'ACCESS_DENIED';
+        errorMessage =
+          error.message || 'You do not have permission to query this private dataset.';
       } else if (error.status === 422) {
         errorType = error.message?.includes('Security')
           ? 'SQL_SECURITY_ERROR'
@@ -620,8 +627,15 @@ export default function App() {
           error.message ||
           'The selected dataset is no longer available on the server. The catalog has been refreshed.';
         refreshDatasets(effectiveUser.id);
-      } else if (error.status === 503) {
-        errorType = 'AI_PROVIDER_ERROR';
+      } else if (error.status === 503 || error.status === 429) {
+        const isProviderLimit =
+          error.status === 429 ||
+          /provider limits|quota|temporarily unavailable/i.test(errorMessage);
+        errorType = isProviderLimit ? 'AI_SERVICE_UNAVAILABLE' : 'AI_PROVIDER_ERROR';
+        if (error.status === 429) {
+          errorMessage =
+            'AI query service is temporarily unavailable due to provider limits. Please try again later.';
+        }
       } else if (error.status === 401) {
         errorType = 'UNAUTHORIZED';
         errorMessage = 'Authentication expired. Please sign in again.';
@@ -931,12 +945,7 @@ export default function App() {
             onNavigate={handleNavigate}
             onDatasetsLoaded={(fresh) => {
               if (fresh.length > 0) {
-                setDatasets((prev) => {
-                  const map = new Map<string, AppDataset>();
-                  prev.forEach((d) => map.set(d.id, d));
-                  fresh.forEach((d) => map.set(d.id, d));
-                  return Array.from(map.values());
-                });
+                setDatasets(fresh);
               }
             }}
           />

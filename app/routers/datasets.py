@@ -1,5 +1,4 @@
 import logging
-import sqlite3
 import threading
 import uuid
 import json
@@ -9,15 +8,18 @@ from typing import Optional, List, Dict, Any
 from fastapi import UploadFile, File, Form, Depends, HTTPException, status, Query
 from app.routers import TrailingSlashRouter
 from app.config import settings
-from app.database import get_db_connection
+from app.database import DB_INTEGRITY_ERRORS, get_db_connection
 from app.auth import get_current_user, get_optional_user
 from app.services.admin_bootstrap import is_admin_email
 from app.schemas import (
     DatasetDetailResponse, DatasetListResponse, EvaluationResponse, 
     SearchRequest, SearchResponse, SearchItem,
-    DatasetUnlockResponse, DatasetImproveRequest, DatasetImproveResponse
+    DatasetUnlockResponse, DatasetImproveRequest, DatasetImproveResponse,
+    DatasetVisibilityUpdateRequest,
 )
+from app.services.curated_library import has_packaged_curated_csv
 from app.services.evaluation import parse_and_evaluate_csv, run_evaluation_pipeline
+from app.services.r2_storage import R2StorageClient, R2StorageError
 from app.services.recommender import recommend_datasets
 from app.services.storage import (
     persist_dataset,
@@ -33,8 +35,45 @@ _unlock_lock = threading.Lock()
 _upload_lock = threading.Lock()
 
 
-def _is_verified_admin(user: dict) -> bool:
+def _is_verified_admin(user: Optional[dict]) -> bool:
+    if not user:
+        return False
     return bool(user.get("is_admin")) and is_admin_email(user.get("email", ""))
+
+
+def _normalize_visibility(raw_visibility: Optional[str]) -> str:
+    val = (raw_visibility or "public").strip().lower()
+    if val not in ("public", "private"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Dataset visibility must be 'public' or 'private'.",
+        )
+    return val
+
+
+def _can_access_dataset_row(row, user: Optional[dict]) -> bool:
+    keys = row.keys()
+    vis = (row["visibility"] or "public").strip().lower() if "visibility" in keys else "public"
+    if vis != "private":
+        return True
+    if not user:
+        return False
+    return row["user_id"] == user["id"] or _is_verified_admin(user)
+
+
+def _assert_dataset_readable(row, user: Optional[dict]) -> None:
+    if _can_access_dataset_row(row, user):
+        return
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to access a private dataset.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Access denied: this dataset is private and only accessible to its owner or a platform administrator.",
+    )
 
 def _get_dataset_unlocks_map(conn) -> Dict[str, List[str]]:
     """Helper to fetch all unlock mappings across datasets."""
@@ -53,8 +92,10 @@ async def upload_dataset(
     file: UploadFile = File(...),
     domain: str = Form("general"),
     name: Optional[str] = Form(None),
+    visibility: str = Form("public"),
     user: dict = Depends(get_current_user)
 ):
+    clean_visibility = _normalize_visibility(visibility)
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -107,6 +148,19 @@ async def upload_dataset(
                 )
 
         # 1. Persist actual tabular data in DuckDB and disk storage
+        r2_meta: Optional[Dict[str, Any]] = None
+        r2_client = R2StorageClient()
+        cleaned_csv_bytes = cleaned_csv.encode("utf-8")
+
+        if settings.is_production and getattr(settings, "R2_REQUIRED_IN_PRODUCTION", True) and not r2_client.is_configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "Community dataset uploads are unavailable in this production deployment because permanent "
+                    "file storage is not configured. Curated public datasets remain available to query."
+                ),
+            )
+
         try:
             persist_dataset(
                 dataset_id=dataset_id,
@@ -124,18 +178,38 @@ async def upload_dataset(
                 detail="Failed to persist dataset into analytical storage. Please verify CSV formatting."
             )
 
-        # 2. Insert metadata into SQLite catalog
+        # 1b. Persist uploaded community CSV to Cloudflare R2 when configured (never silently lose files)
+        if getattr(settings, "R2_PERSIST_COMMUNITY_UPLOADS", True) and r2_client.is_configured:
+            try:
+                r2_meta = r2_client.upload_community_csv(
+                    dataset_id=dataset_id,
+                    csv_bytes=cleaned_csv_bytes,
+                )
+            except (R2StorageError, ValueError) as e:
+                logger.error("Cloudflare R2 upload failed for community dataset %s: %s", dataset_id, e)
+                delete_dataset_storage(dataset_id)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Failed to persist uploaded dataset to permanent cloud storage. Please try again.",
+                )
+
+        # 2. Insert metadata into relational catalog (SQLite locally, PostgreSQL in production)
         try:
             cursor.execute("""
                 INSERT INTO datasets (
                     id, user_id, name, filename, domain, rows_count, columns_count,
-                    schema_json, content_summary, unlock_price, content_hash, created_at
+                    schema_json, content_summary, unlock_price, content_hash, visibility,
+                    object_storage_key, sha256_checksum, csv_bytes, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 dataset_id, user["id"], dataset_name, filename, domain,
                 eval_check["rows_count"], eval_check["columns_count"],
-                schema_json_str, summary, initial_unlock_price, content_hash, now
+                schema_json_str, summary, initial_unlock_price, content_hash, clean_visibility,
+                r2_meta["object_storage_key"] if r2_meta else None,
+                r2_meta["sha256_checksum"] if r2_meta else None,
+                r2_meta["csv_bytes"] if r2_meta else len(cleaned_csv_bytes),
+                now
             ))
 
             cursor.execute("""
@@ -150,20 +224,45 @@ async def upload_dataset(
             conn.rollback()
             logger.exception("Failed to register metadata for dataset %s", dataset_id)
             delete_dataset_storage(dataset_id)
+            if r2_meta:
+                try:
+                    r2_client.delete_object(r2_meta["object_storage_key"])
+                except Exception:
+                    logger.warning("Failed to clean up R2 object %s after DB rollback.", r2_meta["object_storage_key"])
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to register dataset metadata."
             )
     
-    # 3. Execute evaluation pipeline (updates evaluation status and awards credits)
-    run_evaluation_pipeline(
-        evaluation_id=evaluation_id,
-        dataset_id=dataset_id,
-        csv_content=cleaned_csv,
-        filename=filename,
-        domain=domain,
-        user_id=user["id"]
-    )
+    # 3. Execute evaluation pipeline (updates evaluation status and awards credits only on success)
+    try:
+        run_evaluation_pipeline(
+            evaluation_id=evaluation_id,
+            dataset_id=dataset_id,
+            csv_content=cleaned_csv,
+            filename=filename,
+            domain=domain,
+            user_id=user["id"]
+        )
+    except Exception:
+        logger.exception("Evaluation pipeline failed unexpectedly for dataset %s; rolling back upload", dataset_id)
+        try:
+            conn.rollback()
+            cursor.execute("DELETE FROM evaluations WHERE dataset_id = ?", (dataset_id,))
+            cursor.execute("DELETE FROM datasets WHERE id = ?", (dataset_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        delete_dataset_storage(dataset_id)
+        if r2_meta:
+            try:
+                r2_client.delete_object(r2_meta["object_storage_key"])
+            except Exception:
+                logger.warning("Failed to clean up R2 object %s after evaluation rollback.", r2_meta["object_storage_key"])
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Dataset evaluation failed; upload rolled back with 0 credits awarded."
+        )
     
     # Fetch completed evaluation and updated unlock price
     cursor.execute("SELECT * FROM evaluations WHERE dataset_id = ?", (dataset_id,))
@@ -193,24 +292,127 @@ async def upload_dataset(
         domain_relevance_score=domain_rel,
         overall_score=overall,
         credits_awarded=credits_awarded,
+        visibility=clean_visibility,
         created_at=now
     )
 
+def _resolve_dataset_availability(row, table_exists: bool) -> tuple[bool, str]:
+    """Resolve storage_available and human-readable availability for community & curated datasets."""
+    keys = row.keys()
+    is_curated = bool(row["is_curated"]) if "is_curated" in keys else False
+    if table_exists:
+        return True, "Available"
+    ds_id = str(row["id"] or "").strip() if "id" in keys else ""
+    obj_key = (row["object_storage_key"] or "").strip() if "object_storage_key" in keys else ""
+    checksum = (row["sha256_checksum"] or "").strip() if "sha256_checksum" in keys else ""
+    if is_curated:
+        ing_status = (row["ingestion_status"] or "").strip().lower() if "ingestion_status" in keys else ""
+        if ing_status == "ingested" and checksum:
+            if has_packaged_curated_csv(ds_id) or obj_key:
+                return True, "On-Demand Ready"
+            return False, "Missing Packaged File"
+        if ing_status == "pending_ingestion":
+            return False, "Pending Ingestion"
+    elif obj_key and checksum:
+        return True, "Cloud-Backed Ready"
+    return False, "Unavailable"
+
+
+def _row_to_dataset_detail(row, unlocked_list: List[str], eval_info, table_exists: bool) -> DatasetDetailResponse:
+    keys = row.keys()
+    is_curated = bool(row["is_curated"]) if "is_curated" in keys else False
+    dataset_type = (row["dataset_type"] if "dataset_type" in keys and row["dataset_type"] else None) or (
+        "curated" if is_curated else "community"
+    )
+    price = 0 if is_curated else (row["unlock_price"] if "unlock_price" in keys and row["unlock_price"] is not None else 10)
+    is_avail, availability_label = _resolve_dataset_availability(row, table_exists)
+
+    return DatasetDetailResponse(
+        id=row["id"],
+        user_id=row["user_id"],
+        name=row["name"],
+        filename=row["filename"],
+        domain=row["domain"],
+        rows_count=row["rows_count"],
+        columns_count=row["columns_count"],
+        schema_metadata=json.loads(row["schema_json"]) if row["schema_json"] else {},
+        content_summary=row["content_summary"],
+        unlock_price=price,
+        unlocked_by=unlocked_list,
+        storage_available=is_avail,
+        availability=availability_label,
+        quality_score=float(eval_info["quality_score"]) if eval_info else None,
+        domain_relevance_score=float(eval_info["domain_relevance_score"]) if eval_info else None,
+        overall_score=float(eval_info["overall_score"]) if eval_info else None,
+        credits_awarded=int(eval_info["credits_awarded"]) if eval_info else None,
+        created_at=row["created_at"],
+        is_curated=is_curated,
+        dataset_type=dataset_type,
+        source_name=row["source_name"] if "source_name" in keys else None,
+        source_url=row["source_url"] if "source_url" in keys else None,
+        license=row["license"] if "license" in keys else None,
+        license_url=row["license_url"] if "license_url" in keys else None,
+        retrieved_at=row["retrieved_at"] if "retrieved_at" in keys else None,
+        ingestion_status=(row["ingestion_status"] if "ingestion_status" in keys and row["ingestion_status"] else "ready"),
+        sha256_checksum=row["sha256_checksum"] if "sha256_checksum" in keys else None,
+        source_version=row["source_version"] if "source_version" in keys else None,
+        visibility=(row["visibility"] if "visibility" in keys and row["visibility"] else "public"),
+    )
+
+
 @router.get("/datasets", response_model=DatasetListResponse)
-def list_datasets(domain: Optional[str] = Query(None)):
+def list_datasets(
+    domain: Optional[str] = Query(None, description="Optional case-insensitive domain filter"),
+    source: Optional[str] = Query(None, description="Optional library source filter: all, mine, curated, community"),
+    include_pending: bool = Query(False, description="Include un-ingested pending curated metadata entries"),
+    user: Optional[dict] = Depends(get_optional_user),
+):
     conn = get_db_connection()
     cursor = conn.cursor()
-    if domain:
-        cursor.execute("SELECT * FROM datasets WHERE domain = ? ORDER BY created_at DESC", (domain,))
-    else:
-        cursor.execute("SELECT * FROM datasets ORDER BY created_at DESC")
+
+    conditions: List[str] = []
+    params: List[Any] = []
+
+    # Never surface un-ingested pending curated entries as queryable catalog items by default
+    if not include_pending:
+        conditions.append(
+            "NOT (COALESCE(is_curated, 0) = 1 AND LOWER(COALESCE(ingestion_status, 'ready')) != 'ingested')"
+        )
+
+    # Enforce private dataset visibility in the backend
+    if not _is_verified_admin(user):
+        if user:
+            conditions.append("(LOWER(COALESCE(visibility, 'public')) != 'private' OR user_id = ?)")
+            params.append(user["id"])
+        else:
+            conditions.append("LOWER(COALESCE(visibility, 'public')) != 'private'")
+
+    if domain and domain.strip() and domain.strip().lower() != "all":
+        conditions.append("LOWER(domain) = LOWER(?)")
+        params.append(domain.strip())
+    if source and source.strip():
+        src = source.strip().lower()
+        if src == "curated":
+            conditions.append("COALESCE(is_curated, 0) = 1")
+        elif src == "community":
+            conditions.append("COALESCE(is_curated, 0) = 0 AND LOWER(COALESCE(visibility, 'public')) != 'private'")
+        elif src == "mine":
+            if not user:
+                return DatasetListResponse(datasets=[], total=0)
+            conditions.append("user_id = ? AND COALESCE(is_curated, 0) = 0")
+            params.append(user["id"])
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    cursor.execute(f"SELECT * FROM datasets {where_clause} ORDER BY created_at DESC", params)
     rows = cursor.fetchall()
-    
+
     unlocks_map = _get_dataset_unlocks_map(conn)
     existing_tables = get_existing_dataset_ids()
-    
-    # Fetch evaluations map
-    cursor.execute("SELECT dataset_id, quality_score, domain_relevance_score, overall_score, credits_awarded FROM evaluations")
+
+    # Fetch evaluations map (ordered oldest -> newest so dict keeps latest evaluation per dataset)
+    cursor.execute(
+        "SELECT dataset_id, quality_score, domain_relevance_score, overall_score, credits_awarded FROM evaluations ORDER BY created_at ASC"
+    )
     eval_map = {r["dataset_id"]: r for r in cursor.fetchall()}
 
     items = []
@@ -218,80 +420,43 @@ def list_datasets(domain: Optional[str] = Query(None)):
         ds_id = r["id"]
         author_id = r["user_id"]
         unlocked_list = list(set([author_id] + unlocks_map.get(ds_id, [])))
-        price = r["unlock_price"] if "unlock_price" in r.keys() and r["unlock_price"] is not None else 10
         eval_info = eval_map.get(ds_id)
-        is_avail = ds_id in existing_tables
-
-        items.append(DatasetDetailResponse(
-            id=ds_id,
-            user_id=author_id,
-            name=r["name"],
-            filename=r["filename"],
-            domain=r["domain"],
-            rows_count=r["rows_count"],
-            columns_count=r["columns_count"],
-            schema_metadata=json.loads(r["schema_json"]),
-            content_summary=r["content_summary"],
-            unlock_price=price,
-            unlocked_by=unlocked_list,
-            storage_available=is_avail,
-            availability="Available" if is_avail else "Unavailable",
-            quality_score=float(eval_info["quality_score"]) if eval_info else None,
-            domain_relevance_score=float(eval_info["domain_relevance_score"]) if eval_info else None,
-            overall_score=float(eval_info["overall_score"]) if eval_info else None,
-            credits_awarded=int(eval_info["credits_awarded"]) if eval_info else None,
-            created_at=r["created_at"]
-        ))
+        table_exists = ds_id in existing_tables
+        items.append(_row_to_dataset_detail(r, unlocked_list, eval_info, table_exists))
     return DatasetListResponse(datasets=items, total=len(items))
 
 @router.get("/datasets/{dataset_id}", response_model=DatasetDetailResponse)
-def get_dataset(dataset_id: str):
+def get_dataset(dataset_id: str, user: Optional[dict] = Depends(get_optional_user)):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,))
     r = cursor.fetchone()
     if not r:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
-        
+    _assert_dataset_readable(r, user)
+
     cursor.execute("SELECT user_id FROM dataset_unlocks WHERE dataset_id = ?", (dataset_id,))
     unlocked_users = [row["user_id"] for row in cursor.fetchall()]
     if r["user_id"] not in unlocked_users:
         unlocked_users.append(r["user_id"])
 
-    price = r["unlock_price"] if "unlock_price" in r.keys() and r["unlock_price"] is not None else 10
-
     cursor.execute("SELECT quality_score, domain_relevance_score, overall_score, credits_awarded FROM evaluations WHERE dataset_id = ?", (dataset_id,))
     eval_info = cursor.fetchone()
     try:
-        is_avail = dataset_table_exists(dataset_id)
+        table_exists = dataset_table_exists(dataset_id)
     except ValueError:
-        is_avail = False
+        table_exists = False
 
-    return DatasetDetailResponse(
-        id=r["id"],
-        user_id=r["user_id"],
-        name=r["name"],
-        filename=r["filename"],
-        domain=r["domain"],
-        rows_count=r["rows_count"],
-        columns_count=r["columns_count"],
-        schema_metadata=json.loads(r["schema_json"]),
-        content_summary=r["content_summary"],
-        unlock_price=price,
-        unlocked_by=unlocked_users,
-        storage_available=is_avail,
-        availability="Available" if is_avail else "Unavailable",
-        quality_score=float(eval_info["quality_score"]) if eval_info else None,
-        domain_relevance_score=float(eval_info["domain_relevance_score"]) if eval_info else None,
-        overall_score=float(eval_info["overall_score"]) if eval_info else None,
-        credits_awarded=int(eval_info["credits_awarded"]) if eval_info else None,
-        created_at=r["created_at"]
-    )
+    return _row_to_dataset_detail(r, unlocked_users, eval_info, table_exists)
 
 @router.get("/datasets/{dataset_id}/evaluation", response_model=EvaluationResponse)
-def get_dataset_evaluation(dataset_id: str):
+def get_dataset_evaluation(dataset_id: str, user: Optional[dict] = Depends(get_optional_user)):
     conn = get_db_connection()
     cursor = conn.cursor()
+    cursor.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,))
+    ds_row = cursor.fetchone()
+    if ds_row:
+        _assert_dataset_readable(ds_row, user)
     cursor.execute("SELECT * FROM evaluations WHERE dataset_id = ?", (dataset_id,))
     r = cursor.fetchone()
     if not r:
@@ -312,6 +477,36 @@ def get_dataset_evaluation(dataset_id: str):
         updated_at=r["updated_at"],
         created_at=r["created_at"]
     )
+
+
+@router.patch("/datasets/{dataset_id}/visibility", response_model=DatasetDetailResponse)
+def update_dataset_visibility(
+    dataset_id: str,
+    req: DatasetVisibilityUpdateRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Toggle a dataset's visibility between 'public' and 'private' (owner or admin only)."""
+    new_vis = _normalize_visibility(req.visibility)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,))
+    ds_row = cursor.fetchone()
+    if not ds_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset '{dataset_id}' not found")
+    if ds_row["user_id"] != user["id"] and not _is_verified_admin(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the dataset owner or a platform administrator may change visibility.",
+        )
+    if bool(ds_row["is_curated"]) and new_vis == "private":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Curated Public Library datasets must remain publicly accessible.",
+        )
+
+    cursor.execute("UPDATE datasets SET visibility = ? WHERE id = ?", (new_vis, dataset_id))
+    conn.commit()
+    return get_dataset(dataset_id, user=user)
 
 @router.delete("/datasets/{dataset_id}")
 def delete_dataset(dataset_id: str, user: dict = Depends(get_current_user)):
@@ -363,17 +558,32 @@ def unlock_dataset(dataset_id: str, user: dict = Depends(get_current_user)):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # 1. Verify dataset exists
+        # 1. Verify dataset exists and caller is authorized to view it
         cursor.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,))
         dataset_row = cursor.fetchone()
         if not dataset_row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset '{dataset_id}' not found")
+        _assert_dataset_readable(dataset_row, user)
 
         owner_id = dataset_row["user_id"]
         dataset_name = dataset_row["name"]
-        price = dataset_row["unlock_price"] if "unlock_price" in dataset_row.keys() and dataset_row["unlock_price"] is not None else 10
+        is_curated = bool(dataset_row["is_curated"]) if "is_curated" in dataset_row.keys() else False
+        price = 0 if is_curated else (dataset_row["unlock_price"] if "unlock_price" in dataset_row.keys() and dataset_row["unlock_price"] is not None else 10)
 
-        # 2. Check if user is owner (always free)
+        # 2a. Curated public datasets are permanently free for all authenticated users (0 credits, 0 transactions)
+        if is_curated:
+            cursor.execute("SELECT credits FROM users WHERE id = ?", (user["id"],))
+            bal_row = cursor.fetchone()
+            return DatasetUnlockResponse(
+                dataset_id=dataset_id,
+                unlocked=True,
+                already_unlocked=True,
+                credits_charged=0,
+                remaining_balance=int(bal_row["credits"]) if bal_row else user["credits"],
+                message="Curated Public Library datasets are free to access for all authenticated users."
+            )
+
+        # 2b. Check if user is owner (always free)
         if user["id"] == owner_id:
             cursor.execute("SELECT credits FROM users WHERE id = ?", (user["id"],))
             bal_row = cursor.fetchone()
@@ -395,7 +605,7 @@ def unlock_dataset(dataset_id: str, user: dict = Depends(get_current_user)):
                 INSERT INTO dataset_unlocks (id, dataset_id, user_id, unlock_price, created_at)
                 VALUES (?, ?, ?, ?, ?)
             """, (unlock_record_id, dataset_id, user["id"], price, now))
-        except sqlite3.IntegrityError:
+        except DB_INTEGRITY_ERRORS:
             conn.rollback()
             cursor.execute("SELECT credits FROM users WHERE id = ?", (user["id"],))
             bal_row = cursor.fetchone()
@@ -547,32 +757,83 @@ def improve_dataset(dataset_id: str, req: DatasetImproveRequest, user: dict = De
 
 @router.post("/datasets/search", response_model=SearchResponse)
 @router.post("/search", response_model=SearchResponse)
-def search_datasets(req: SearchRequest):
+def search_datasets(req: SearchRequest, user: Optional[dict] = Depends(get_optional_user)):
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    if req.domain:
-        cursor.execute("SELECT * FROM datasets WHERE domain = ?", (req.domain,))
-    else:
-        cursor.execute("SELECT * FROM datasets")
-    all_datasets = [dict(row) for row in cursor.fetchall()]
-    
-    ranked, method = recommend_datasets(req.query, all_datasets, limit=req.limit)
-    
-    items = [
-        SearchItem(
-            dataset_id=d["id"],
-            name=d["name"],
-            domain=d["domain"],
-            score=d["score"],
-            summary=d["content_summary"],
-            rows_count=d["rows_count"],
-            unlock_price=d.get("unlock_price", 10)
-        ) for d in ranked
+
+    conditions: List[str] = [
+        "NOT (COALESCE(is_curated, 0) = 1 AND LOWER(COALESCE(ingestion_status, 'ready')) != 'ingested')"
     ]
+    params: List[Any] = []
+    if not _is_verified_admin(user):
+        if user:
+            conditions.append("(LOWER(COALESCE(visibility, 'public')) != 'private' OR user_id = ?)")
+            params.append(user["id"])
+        else:
+            conditions.append("LOWER(COALESCE(visibility, 'public')) != 'private'")
+
+    if req.domain and req.domain.strip() and req.domain.strip().lower() != "all":
+        conditions.append("LOWER(domain) = LOWER(?)")
+        params.append(req.domain.strip())
+
+    where_clause = f"WHERE {' AND '.join(conditions)}"
+    cursor.execute(f"SELECT * FROM datasets {where_clause}", params)
+    all_datasets = [dict(row) for row in cursor.fetchall()]
+
+    ranked, method = recommend_datasets(req.query, all_datasets, limit=req.limit)
+
+    unlocks_map = _get_dataset_unlocks_map(conn)
+    existing_tables = get_existing_dataset_ids()
+    cursor.execute(
+        "SELECT dataset_id, quality_score, domain_relevance_score, overall_score, credits_awarded FROM evaluations ORDER BY created_at ASC"
+    )
+    eval_map = {r["dataset_id"]: r for r in cursor.fetchall()}
+
+    items = []
+    for d in ranked:
+        ds_id = d["id"]
+        author_id = d.get("user_id")
+        is_curated = bool(d.get("is_curated"))
+        dataset_type = d.get("dataset_type") or ("curated" if is_curated else "community")
+        raw_unlock = d.get("unlock_price")
+        price = 0 if is_curated else (int(raw_unlock) if raw_unlock is not None else 10)
+        eval_info = eval_map.get(ds_id)
+        unlocked_list = list(set(([author_id] if author_id else []) + unlocks_map.get(ds_id, [])))
+        is_avail, availability_label = _resolve_dataset_availability(d, ds_id in existing_tables)
+        items.append(
+            SearchItem(
+                dataset_id=ds_id,
+                user_id=author_id,
+                name=d["name"],
+                filename=d.get("filename"),
+                domain=d["domain"],
+                score=d["score"],
+                summary=d["content_summary"],
+                rows_count=d["rows_count"],
+                columns_count=d.get("columns_count"),
+                unlock_price=price,
+                unlocked_by=unlocked_list,
+                quality_score=float(eval_info["quality_score"]) if eval_info else None,
+                domain_relevance_score=float(eval_info["domain_relevance_score"]) if eval_info else None,
+                overall_score=float(eval_info["overall_score"]) if eval_info else None,
+                storage_available=is_avail,
+                availability=availability_label,
+                is_curated=is_curated,
+                dataset_type=dataset_type,
+                visibility=d.get("visibility") or "public",
+                license=d.get("license"),
+                source_name=d.get("source_name"),
+                created_at=d.get("created_at"),
+            )
+        )
     return SearchResponse(query=req.query, results=items, total=len(items), method=method)
 
 @router.get("/datasets/search", response_model=SearchResponse)
-def search_datasets_get(q: str = Query(..., min_length=1), domain: Optional[str] = Query(None), limit: int = Query(10, ge=1, le=100)):
+def search_datasets_get(
+    q: str = Query(..., min_length=1),
+    domain: Optional[str] = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+    user: Optional[dict] = Depends(get_optional_user),
+):
     req = SearchRequest(query=q, domain=domain, limit=limit)
-    return search_datasets(req)
+    return search_datasets(req, user=user)

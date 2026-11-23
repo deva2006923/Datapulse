@@ -48,13 +48,23 @@ export function backendDatasetToAppDataset(
     evalData?.overall_score ?? backend.overall_score ?? Math.round((qualityScore + relevanceScore) / 2);
 
   const isOwner = Boolean(currentUserId && backend.user_id === currentUserId);
+  const isCurated = Boolean(backend.is_curated || backend.dataset_type === 'curated');
+  const datasetType: 'curated' | 'community' = isCurated ? 'curated' : 'community';
+  const visibility: 'public' | 'private' =
+    !isCurated && String(backend.visibility || 'public').toLowerCase() === 'private'
+      ? 'private'
+      : 'public';
   const formattedDomain = backend.domain
     ? backend.domain.charAt(0).toUpperCase() + backend.domain.slice(1)
     : 'General';
 
-  const unlockPrice = backend.unlock_price ?? 10;
+  const unlockPrice = isCurated ? 0 : (backend.unlock_price ?? 10);
   const unlockedList = Array.from(
-    new Set([...(backend.unlocked_by || []), ...(isOwner ? [backend.user_id] : [])])
+    new Set([
+      ...(backend.unlocked_by || []),
+      ...(isOwner ? [backend.user_id] : []),
+      ...(isCurated && currentUserId ? [currentUserId] : []),
+    ])
   );
   const storageAvailable = backend.storage_available ?? true;
   const availability = backend.availability || (storageAvailable ? 'Available' : 'Unavailable');
@@ -81,15 +91,19 @@ export function backendDatasetToAppDataset(
     domain: formattedDomain,
     format: 'csv',
     authorId: backend.user_id,
-    authorName: isOwner ? 'You' : 'Dataset Contributor',
-    cost: isOwner ? 0 : unlockPrice,
+    authorName: isCurated ? 'DataPulse Curated Library' : isOwner ? 'You' : 'Dataset Contributor',
+    cost: isCurated || isOwner ? 0 : unlockPrice,
     unlockPrice,
     qualityScore,
     relevanceScore,
     overallScore,
     status: 'APPROVED',
-    tags: [backend.domain ? backend.domain.toLowerCase() : 'data', 'csv'],
-    license: 'MIT',
+    tags: [
+      ...(isCurated ? ['curated'] : ['community']),
+      backend.domain ? backend.domain.toLowerCase() : 'data',
+      'csv',
+    ],
+    license: backend.license || 'MIT',
     usageCount: 0,
     qualityBreakdown: {
       completeness: evalData?.completeness_score ?? qualityScore,
@@ -104,12 +118,12 @@ export function backendDatasetToAppDataset(
     createdAt: backend.created_at
       ? backend.created_at.split('T')[0]
       : new Date().toISOString().split('T')[0],
-    currentVersion: 'v1.0',
+    currentVersion: backend.source_version || 'v1.0',
     versionHistory: [
       {
-        version: 'v1.0',
+        version: backend.source_version || 'v1.0',
         date: backend.created_at?.split('T')[0] || new Date().toISOString().split('T')[0],
-        author: isOwner ? 'You' : 'Contributor',
+        author: isCurated ? 'DataPulse Curated Library' : isOwner ? 'You' : 'Contributor',
         quality: qualityScore,
         relevance: relevanceScore,
         changesSummary: backend.content_summary || 'Initial dataset ingestion and automated evaluation.',
@@ -119,56 +133,126 @@ export function backendDatasetToAppDataset(
     storageAvailable,
     availability,
     sampleQueries: dynamicSampleQueries,
+    isCurated,
+    datasetType,
+    visibility,
+    sourceName: backend.source_name ?? undefined,
+    sourceUrl: backend.source_url ?? undefined,
+    licenseUrl: backend.license_url ?? undefined,
+    retrievedAt: backend.retrieved_at ?? undefined,
+    ingestionStatus: backend.ingestion_status ?? undefined,
+    sha256Checksum: backend.sha256_checksum ?? undefined,
+    sourceVersion: backend.source_version ?? undefined,
   };
 }
 
 /**
  * Transforms a backend SearchItem (from POST /datasets/search) into AppDataset.
+ * Preserves authoritative backend evaluation scores, unlock price, domain, ownership,
+ * and visibility — never overwriting dataset quality/overall scores with search matchScore.
  */
 export function searchItemToAppDataset(
   item: SearchItem,
-  currentUserId?: string
+  currentUserId?: string,
+  existing?: AppDataset
 ): AppDataset {
   const matchPct = Math.round(item.score * 100);
   const formattedDomain = item.domain
     ? item.domain.charAt(0).toUpperCase() + item.domain.slice(1)
-    : 'General';
-  const unlockPrice = item.unlock_price ?? 10;
+    : existing?.domain || 'General';
+  const isCurated = Boolean(
+    item.is_curated ??
+      (item.dataset_type !== undefined
+        ? item.dataset_type === 'curated'
+        : existing?.isCurated) ??
+      false
+  );
+  const datasetType: 'curated' | 'community' = isCurated ? 'curated' : 'community';
+  const authorId = item.user_id ?? existing?.authorId ?? '';
+  const isOwner = Boolean(currentUserId && authorId && authorId === currentUserId);
+  const unlockPrice = isCurated
+    ? 0
+    : (item.unlock_price ?? existing?.unlockPrice ?? 10);
+  const visibility: 'public' | 'private' =
+    !isCurated && String(item.visibility ?? existing?.visibility ?? 'public').toLowerCase() === 'private'
+      ? 'private'
+      : 'public';
+
+  const qualityScore = item.quality_score ?? existing?.qualityScore ?? 0;
+  const relevanceScore = item.domain_relevance_score ?? existing?.relevanceScore ?? 0;
+  const overallScore =
+    item.overall_score ??
+    existing?.overallScore ??
+    (qualityScore > 0 && relevanceScore > 0
+      ? Math.round(((qualityScore + relevanceScore) / 2) * 100) / 100
+      : qualityScore || relevanceScore || 0);
+
+  const unlockedList = Array.from(
+    new Set([
+      ...(existing?.unlockedBy || []),
+      ...(item.unlocked_by || []),
+      ...(isOwner && authorId ? [authorId] : []),
+      ...(isCurated && currentUserId ? [currentUserId] : []),
+    ])
+  );
+
+  const storageAvailable =
+    item.storage_available ?? existing?.storageAvailable ?? true;
+  const availability =
+    item.availability ?? existing?.availability ?? (storageAvailable ? 'Available' : 'Unavailable');
 
   return {
     id: item.dataset_id,
-    name: `${item.dataset_id}.csv`,
+    name: item.filename || existing?.name || `${item.dataset_id}.csv`,
     title: item.name,
     description: item.summary,
     domain: formattedDomain,
-    format: 'csv',
-    authorId: '',
-    authorName: 'Dataset Contributor',
-    cost: unlockPrice,
+    format: existing?.format || 'csv',
+    authorId,
+    authorName: isCurated
+      ? 'DataPulse Curated Library'
+      : isOwner
+      ? 'You'
+      : existing?.authorName || 'Dataset Contributor',
+    cost: isCurated || isOwner ? 0 : unlockPrice,
     unlockPrice,
-    qualityScore: Math.min(100, Math.max(0, matchPct)),
-    relevanceScore: Math.min(100, Math.max(0, matchPct)),
-    overallScore: Math.min(100, Math.max(0, matchPct)),
-    status: 'APPROVED',
-    tags: [item.domain ? item.domain.toLowerCase() : 'data'],
-    license: 'MIT',
-    usageCount: 0,
-    qualityBreakdown: {
-      completeness: matchPct,
-      validity: matchPct,
-      uniqueness: matchPct,
-      consistency: matchPct,
+    qualityScore,
+    relevanceScore,
+    overallScore,
+    status: existing?.status || 'APPROVED',
+    tags: existing?.tags?.length
+      ? existing.tags
+      : [
+          ...(isCurated ? ['curated'] : ['community']),
+          item.domain ? item.domain.toLowerCase() : 'data',
+          'csv',
+        ],
+    license: item.license || existing?.license || 'MIT',
+    usageCount: existing?.usageCount ?? 0,
+    qualityBreakdown: existing?.qualityBreakdown || {
+      completeness: qualityScore,
+      validity: qualityScore,
+      uniqueness: qualityScore,
+      consistency: qualityScore,
     },
     rowCount: item.rows_count,
-    columnCount: 0,
-    columns: [],
-    previewRows: [],
-    createdAt: new Date().toISOString().split('T')[0],
-    currentVersion: 'v1.0',
-    versionHistory: [],
-    unlockedBy: [],
-    sampleQueries: [`How many records are in ${item.name}?`],
+    columnCount: item.columns_count ?? existing?.columnCount ?? 0,
+    columns: existing?.columns || [],
+    previewRows: existing?.previewRows || [],
+    createdAt: item.created_at
+      ? item.created_at.split('T')[0]
+      : existing?.createdAt || new Date().toISOString().split('T')[0],
+    currentVersion: existing?.currentVersion || 'v1.0',
+    versionHistory: existing?.versionHistory || [],
+    unlockedBy: unlockedList,
+    storageAvailable,
+    availability,
+    sampleQueries: existing?.sampleQueries || [`How many records are in ${item.name}?`],
     matchScore: matchPct,
+    isCurated,
+    datasetType,
+    visibility,
+    sourceName: item.source_name ?? existing?.sourceName,
   };
 }
 

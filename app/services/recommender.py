@@ -37,7 +37,7 @@ def recommend_datasets(query: str, datasets: List[Dict[str, Any]], limit: int = 
         return [], "none"
         
     corpus = [
-        f"{d.get('name', '')} {d.get('domain', '')} {d.get('content_summary', '')} {d.get('schema_json', '')}"
+        f"{d.get('name', '')} {d.get('filename', '')} {d.get('domain', '')} {d.get('content_summary', '')} {d.get('schema_json', '')}"
         for d in datasets
     ]
     

@@ -47,6 +47,16 @@ def _get_raw_connection() -> duckdb.DuckDBPyConnection:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Dedicated LRU tracking table strictly for curated datasets (never evicts community tables)
+        _duckdb_connection.execute("""
+            CREATE TABLE IF NOT EXISTS _curated_cache_lru (
+                dataset_id VARCHAR PRIMARY KEY,
+                size_bytes BIGINT NOT NULL,
+                sha256_checksum VARCHAR NOT NULL,
+                hydrated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_accessed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
     return _duckdb_connection
 
 
@@ -198,6 +208,7 @@ def delete_dataset_storage(dataset_id: str) -> None:
             conn = _get_raw_connection()
             conn.execute(f"DROP TABLE IF EXISTS {table_name}")
             conn.execute("DELETE FROM _dataset_registry WHERE dataset_id = ?", [dataset_id])
+            conn.execute("DELETE FROM _curated_cache_lru WHERE dataset_id = ?", [dataset_id])
         except Exception as e:
             logger.warning("Error dropping DuckDB table for %s: %s", dataset_id, e)
 
@@ -264,3 +275,135 @@ def get_dataset_rows(dataset_id: str, limit: int = 100, offset: int = 0) -> List
         cols = [r[0] for r in conn.execute(f"DESCRIBE {table_name}").fetchall()]
         rows = conn.execute(f"SELECT * FROM {table_name} LIMIT ? OFFSET ?", [limit, offset]).fetchall()
         return [dict(zip(cols, row)) for row in rows]
+
+
+def record_curated_hydration(dataset_id: str, size_bytes: int, sha256_checksum: str) -> None:
+    """Record or refresh a hydrated curated dataset in the bounded LRU cache table."""
+    with _duckdb_lock:
+        conn = _get_raw_connection()
+        conn.execute("DELETE FROM _curated_cache_lru WHERE dataset_id = ?", [dataset_id])
+        conn.execute(
+            """
+            INSERT INTO _curated_cache_lru (dataset_id, size_bytes, sha256_checksum, hydrated_at, last_accessed_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            [dataset_id, max(0, int(size_bytes)), str(sha256_checksum).lower()],
+        )
+
+
+def touch_curated_cache_entry(dataset_id: str) -> Optional[str]:
+    """
+    Update last_accessed_at for a cached curated dataset and return its stored SHA-256 checksum
+    if present in `_curated_cache_lru`, else None.
+    """
+    with _duckdb_lock:
+        conn = _get_raw_connection()
+        row = conn.execute(
+            "SELECT sha256_checksum FROM _curated_cache_lru WHERE dataset_id = ?",
+            [dataset_id],
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "UPDATE _curated_cache_lru SET last_accessed_at = CURRENT_TIMESTAMP WHERE dataset_id = ?",
+            [dataset_id],
+        )
+        return str(row[0])
+
+
+def get_curated_cache_stats() -> Dict[str, Any]:
+    """Return current curated LRU cache table count, byte size, and ordered entries (LRU first)."""
+    with _duckdb_lock:
+        conn = _get_raw_connection()
+        rows = conn.execute(
+            """
+            SELECT dataset_id, size_bytes, sha256_checksum, hydrated_at, last_accessed_at
+            FROM _curated_cache_lru
+            ORDER BY last_accessed_at ASC, hydrated_at ASC, dataset_id ASC
+            """
+        ).fetchall()
+        entries = [
+            {
+                "dataset_id": str(r[0]),
+                "size_bytes": int(r[1] or 0),
+                "sha256_checksum": str(r[2] or ""),
+                "hydrated_at": str(r[3] or ""),
+                "last_accessed_at": str(r[4] or ""),
+            }
+            for r in rows
+        ]
+        return {
+            "count": len(entries),
+            "total_bytes": sum(e["size_bytes"] for e in entries),
+            "entries": entries,
+        }
+
+
+def evict_curated_cache_if_needed(
+    incoming_bytes: int,
+    max_bytes: Optional[int] = None,
+    max_tables: Optional[int] = None,
+    protect_dataset_id: Optional[str] = None,
+) -> List[str]:
+    """
+    Enforce the bounded curated LRU cache (default 200 MB / max 25 tables).
+    Evicts ONLY least-recently-used curated datasets from DuckDB and disk storage;
+    NEVER evicts community datasets.
+    """
+    byte_limit = max_bytes if max_bytes is not None else max(1, int(settings.CURATED_CACHE_MAX_MB)) * 1024 * 1024
+    table_limit = max_tables if max_tables is not None else max(1, int(settings.CURATED_CACHE_MAX_TABLES))
+    need_bytes = max(0, int(incoming_bytes))
+
+    evicted: List[str] = []
+    storage_dir = os.path.abspath(settings.DATASETS_STORAGE_DIR)
+
+    with _duckdb_lock:
+        conn = _get_raw_connection()
+        rows = conn.execute(
+            """
+            SELECT dataset_id, size_bytes
+            FROM _curated_cache_lru
+            ORDER BY last_accessed_at ASC, hydrated_at ASC, dataset_id ASC
+            """
+        ).fetchall()
+
+        entries = [(str(r[0]), int(r[1] or 0)) for r in rows]
+        active_count = len(entries)
+        active_bytes = sum(sz for _, sz in entries)
+
+        # If protect_dataset_id is already cached, we are replacing it in place
+        existing_protect_bytes = sum(sz for ds_id, sz in entries if ds_id == protect_dataset_id)
+        if protect_dataset_id and any(ds_id == protect_dataset_id for ds_id, _ in entries):
+            active_count -= 1
+            active_bytes -= existing_protect_bytes
+
+        for ds_id, sz in entries:
+            if ds_id == protect_dataset_id:
+                continue
+            within_tables = (active_count + 1) <= table_limit
+            within_bytes = (active_bytes + need_bytes) <= byte_limit
+            if within_tables and within_bytes:
+                break
+
+            try:
+                tbl = get_dataset_table_name(ds_id)
+                conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+            except Exception as e:
+                logger.warning("Failed dropping evicted curated table %s: %s", ds_id, e)
+            conn.execute("DELETE FROM _dataset_registry WHERE dataset_id = ?", [ds_id])
+            conn.execute("DELETE FROM _curated_cache_lru WHERE dataset_id = ?", [ds_id])
+
+            csv_path = os.path.join(storage_dir, f"{ds_id}.csv")
+            if os.path.exists(csv_path):
+                try:
+                    os.remove(csv_path)
+                except Exception:
+                    pass
+
+            evicted.append(ds_id)
+            active_count -= 1
+            active_bytes = max(0, active_bytes - sz)
+
+    if evicted:
+        logger.info("Evicted %d LRU curated dataset(s) to stay within cache bounds: %s", len(evicted), evicted)
+    return evicted

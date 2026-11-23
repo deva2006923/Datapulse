@@ -28,23 +28,32 @@ def get_user_balance(user_id: str, conn: sqlite3.Connection) -> int:
 def check_query_permission_and_cost(
     user_id: str,
     dataset_owner_id: Optional[str],
-    conn: sqlite3.Connection
+    conn: sqlite3.Connection,
+    is_curated: bool = False,
 ) -> Tuple[int, int, bool]:
     """
-    Determines query cost and dataset owner reward based on ownership rules.
+    Determines query cost and dataset owner reward based on ownership and library rules.
 
-    RULE: Querying Own Dataset:
+    RULE: Curated Public Dataset (`is_curated=True`):
+      - query_cost = 0 (free to query for all authenticated users, even with 0 credits)
+      - owner_reward = 0 (no artificial credits or reward transactions minted)
+      - is_own_dataset = False
+
+    RULE: Querying Own Community Dataset:
       - query_cost = 0 (free self-service querying for dataset owners)
       - owner_reward = 0 (prevents self-reward gaming and artificial credit inflation)
       - is_own_dataset = True
       - Creators can query their own datasets without being blocked even with 0 credits.
 
-    RULE: Querying Another User's Dataset:
+    RULE: Querying Another User's Community Dataset:
       - query_cost = max(0, settings.QUERY_COST)
       - owner_reward = max(0, settings.DATASET_OWNER_REWARD)
       - is_own_dataset = False
       - User balance must be >= query_cost; raises InsufficientCreditsError if balance is too low.
     """
+    if is_curated:
+        return 0, 0, False
+
     is_own_dataset = bool(dataset_owner_id and user_id == dataset_owner_id)
     if is_own_dataset:
         return 0, 0, True
@@ -69,7 +78,8 @@ def apply_query_marketplace_transaction(
     query_cost: int,
     owner_reward: int,
     is_own_dataset: bool,
-    now: Optional[str] = None
+    now: Optional[str] = None,
+    is_curated: bool = False,
 ) -> Dict[str, Any]:
     """
     Atomically performs:
@@ -77,13 +87,16 @@ def apply_query_marketplace_transaction(
       2. Credit reward to dataset owner (if different user and reward > 0).
       3. Credit transaction recording in credit_transactions for auditability.
 
+    Curated datasets (`is_curated=True`) and free own-dataset queries (`query_cost == 0`)
+    always charge 0 credits, award 0 credits, and insert 0 credit_transactions rows.
+
     Raises InsufficientCreditsError if balance check fails during the atomic update.
     """
-    if is_own_dataset or query_cost == 0:
+    if is_curated or is_own_dataset or query_cost == 0:
         return {
             "charged": 0,
             "rewarded": 0,
-            "is_own_dataset": True,
+            "is_own_dataset": is_own_dataset,
             "fee_transaction_id": None,
             "reward_transaction_id": None
         }

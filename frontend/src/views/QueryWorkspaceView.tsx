@@ -71,7 +71,9 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
   onNavigate,
   onExecuteQuery,
 }) => {
-  const selectableDatasets = datasets.filter((d) => d.status !== 'REJECTED');
+  const selectableDatasets = datasets.filter(
+    (d) => d.status !== 'REJECTED' && !(d.isCurated && d.storageAvailable === false)
+  );
   const activeDataset =
     selectableDatasets.find((d) => d.id === selectedDatasetId) ||
     selectableDatasets.find((d) => d.storageAvailable !== false) ||
@@ -190,12 +192,13 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
   }
 
   const isOwner = activeDataset.authorId === currentUser.id;
-  const isUnlocked = isOwner || activeDataset.unlockedBy.includes(currentUser.id);
+  const isCurated = Boolean(activeDataset.isCurated);
+  const isUnlocked = isOwner || isCurated || activeDataset.unlockedBy.includes(currentUser.id);
   const isStorageAvailable = activeDataset.storageAvailable !== false;
   const availabilityLabel =
     activeDataset.availability || (isStorageAvailable ? 'Available' : 'Unavailable');
-  const queryCost = isOwner ? 0 : 1;
-  const isShortfall = !isOwner && currentUser.credits < queryCost;
+  const queryCost = isOwner || isCurated ? 0 : 1;
+  const isShortfall = !isOwner && !isCurated && currentUser.credits < queryCost;
   const shortfallAmount = isShortfall ? queryCost - currentUser.credits : 0;
 
   const handleCopySql = () => {
@@ -339,7 +342,11 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
               {availabilityLabel}
             </span>
             <span className="text-slate-400">•</span>
-            {isOwner ? (
+            {isCurated ? (
+              <span className="text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded font-semibold">
+                Curated Library (Free · 0 cr)
+              </span>
+            ) : isOwner ? (
               <span className="text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded font-semibold">
                 Owner Access (Free)
               </span>
@@ -378,8 +385,8 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
         </div>
       )}
 
-      {/* Notice for Paid vs Owner Datasets */}
-      {!isOwner && isStorageAvailable && (
+      {/* Notice for Paid vs Owner/Curated Datasets */}
+      {!isOwner && !isCurated && isStorageAvailable && (
         <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 shadow-xs flex items-start gap-3">
           <Info className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
           <div className="text-xs text-slate-800 space-y-1">
@@ -479,7 +486,8 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
       {errorBanner && (
         <div
           className={`border rounded-xl p-4 shadow-xs flex items-start justify-between gap-3 ${
-            errorBanner.type === 'INSUFFICIENT_CREDITS'
+            errorBanner.type === 'INSUFFICIENT_CREDITS' ||
+            errorBanner.type === 'AI_SERVICE_UNAVAILABLE'
               ? 'bg-amber-50 border-amber-300 text-amber-900'
               : 'bg-red-50 border-red-300 text-red-900'
           }`}
@@ -526,7 +534,14 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
             <span className="font-semibold">
               Query succeeded.{' '}
               {lastChargedCredits === 0 ? (
-                <>Credits charged: <strong className="font-mono text-emerald-700">0 credits (Free own-dataset access)</strong></>
+                <>
+                  Credits charged:{' '}
+                  <strong className="font-mono text-emerald-700">
+                    {isCurated
+                      ? '0 credits (Free Curated Library access)'
+                      : '0 credits (Free own-dataset access)'}
+                  </strong>
+                </>
               ) : (
                 <>Credits charged: <strong className="font-mono">{lastChargedCredits} credits</strong></>
               )}{' '}

@@ -24,3 +24,9 @@ dist/
 build/
 *.egg-info/
 .DS_Store
+backups/
+*.zip
+*.backup
+*.backup.*
+curated_*_report.json
+data/curated/ds_cur_ing_e2e_*.csv

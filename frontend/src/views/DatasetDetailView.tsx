@@ -33,6 +33,7 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
   const [dataset, setDataset] = useState<AppDataset>(initialDataset);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isUnlocking, setIsUnlocking] = useState<boolean>(false);
+  const [isTogglingVisibility, setIsTogglingVisibility] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const fetchDatasetDetails = async (datasetId: string) => {
@@ -83,8 +84,33 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
     }
   }, [initialDataset?.id]);
 
+  const isCurated = Boolean(dataset.isCurated);
   const isOwner = dataset.authorId === currentUser.id;
-  const isUnlocked = isOwner || dataset.unlockedBy.includes(currentUser.id);
+  const isUnlocked = isCurated || isOwner || dataset.unlockedBy.includes(currentUser.id);
+  const isStorageAvailable = dataset.storageAvailable !== false;
+
+  const handleToggleVisibility = async () => {
+    if (isCurated || !isOwner || isTogglingVisibility) return;
+    const nextVisibility: 'public' | 'private' =
+      dataset.visibility === 'private' ? 'public' : 'private';
+    setIsTogglingVisibility(true);
+    setLoadError(null);
+    try {
+      const updated = await api.datasets.updateVisibility(dataset.id, nextVisibility);
+      setDataset((prev) => ({
+        ...prev,
+        visibility: updated.visibility === 'private' ? 'private' : 'public',
+      }));
+    } catch (err: any) {
+      setLoadError(
+        err instanceof ApiError
+          ? err.message
+          : 'Unable to update dataset visibility.'
+      );
+    } finally {
+      setIsTogglingVisibility(false);
+    }
+  };
 
   const handleUnlock = async () => {
     if (!onUnlockDataset || isUnlocking) return;
@@ -112,18 +138,39 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
         </button>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => onImproveDataset(dataset.id)}
-            className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-medium transition-colors cursor-pointer"
-          >
-            Improve Version
-          </button>
+          {!isCurated && isOwner && (
+            <button
+              onClick={handleToggleVisibility}
+              disabled={isTogglingVisibility}
+              className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 text-slate-700 text-xs font-medium transition-colors cursor-pointer"
+            >
+              {isTogglingVisibility
+                ? 'Updating...'
+                : dataset.visibility === 'private'
+                ? 'Make Public'
+                : 'Make Private'}
+            </button>
+          )}
+          {!isCurated && (
+            <button
+              onClick={() => onImproveDataset(dataset.id)}
+              className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-medium transition-colors cursor-pointer"
+            >
+              Improve Version
+            </button>
+          )}
           <button
             onClick={() => onOpenQueryWithPrompt?.(dataset.id)}
-            className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium transition-colors shadow-xs cursor-pointer flex items-center gap-1.5"
+            disabled={!isStorageAvailable}
+            title={
+              isStorageAvailable
+                ? 'Open in Query Workspace'
+                : 'Dataset storage is not yet available for querying'
+            }
+            className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-medium transition-colors shadow-xs cursor-pointer flex items-center gap-1.5"
           >
             <Search className="w-3.5 h-3.5" />
-            <span>Open in Query Workspace</span>
+            <span>{isStorageAvailable ? 'Open in Query Workspace' : 'Not Yet Queryable'}</span>
           </button>
         </div>
       </div>
@@ -166,9 +213,18 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
               <span className="px-2.5 py-0.5 rounded text-xs font-mono text-slate-500 bg-slate-50 border border-slate-200">
                 {dataset.currentVersion}
               </span>
+              {dataset.visibility === 'private' && !isCurated && (
+                <span className="px-2.5 py-0.5 rounded text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 flex items-center gap-1">
+                  <Lock className="w-3 h-3" /> Private
+                </span>
+              )}
               {dataset.status === 'REJECTED' ? (
                 <span className="px-2.5 py-0.5 rounded text-xs font-semibold bg-red-50 text-red-700 border border-red-200">
                   REJECTED
+                </span>
+              ) : isCurated ? (
+                <span className="px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  Curated Public (Free · 0 cr)
                 </span>
               ) : isOwner ? (
                 <span className="px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
@@ -192,6 +248,44 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
             <p className="text-sm text-slate-600 max-w-3xl leading-relaxed">
               {dataset.description}
             </p>
+
+            {isCurated && (
+              <div className="mt-3 p-3.5 rounded-lg bg-indigo-50/60 border border-indigo-200/80 text-xs text-slate-700 space-y-1.5">
+                <div className="font-semibold text-indigo-900">
+                  Curated Public Library Provenance (Free · 0 Credits per Query)
+                </div>
+                <div className="flex flex-wrap gap-x-5 gap-y-1">
+                  {dataset.sourceName && (
+                    <span>
+                      <strong>Source:</strong> {dataset.sourceName}
+                    </span>
+                  )}
+                  <span>
+                    <strong>License:</strong> {dataset.license}
+                  </span>
+                  {dataset.ingestionStatus && (
+                    <span>
+                      <strong>Status:</strong> {dataset.availability || dataset.ingestionStatus}
+                    </span>
+                  )}
+                  {dataset.sourceUrl && (
+                    <a
+                      href={dataset.sourceUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-indigo-700 hover:underline font-medium"
+                    >
+                      View Original Source ↗
+                    </a>
+                  )}
+                </div>
+                {dataset.sha256Checksum && (
+                  <div className="text-[11px] font-mono text-slate-500 truncate">
+                    SHA-256: {dataset.sha256Checksum}
+                  </div>
+                )}
+              </div>
+            )}
 
             {dataset.status === 'REJECTED' && dataset.rejectionReasons && (
               <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 space-y-1">
@@ -338,14 +432,18 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
           </div>
           <div>
             <h3 className="text-sm font-bold text-slate-900">
-              {isOwner
+              {isCurated
+                ? 'Curated Public Library Access (Free)'
+                : isOwner
                 ? 'Dataset Contributor Access'
                 : isUnlocked
                 ? 'Dataset Access Unlocked'
                 : `Dataset Unlock Price: ${dataset.unlockPrice ?? dataset.cost ?? 10} Credits`}
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              {isOwner
+              {isCurated
+                ? 'Verified public dataset hosted in the DataPulse Curated Library. Analytical queries are free (0 credits per query, 0 owner royalty).'
+                : isOwner
                 ? 'As the author, you have permanent unrestricted query access at 0 credits.'
                 : isUnlocked
                 ? 'You have permanent unlocked access to this dataset. Standard analytical queries are charged at 1 credit per query, with royalty rewards attributed to the contributor.'
@@ -355,7 +453,7 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          {!isOwner && !isUnlocked && onUnlockDataset && (
+          {!isCurated && !isOwner && !isUnlocked && onUnlockDataset && (
             <button
               onClick={handleUnlock}
               disabled={isUnlocking}
@@ -377,10 +475,11 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
 
           <button
             onClick={() => onOpenQueryWithPrompt?.(dataset.id)}
-            className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors whitespace-nowrap flex items-center gap-1.5"
+            disabled={!isStorageAvailable}
+            className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors whitespace-nowrap flex items-center gap-1.5"
           >
             <Search className="w-3.5 h-3.5" />
-            <span>Launch Query Workspace</span>
+            <span>{isStorageAvailable ? 'Launch Query Workspace' : 'Not Yet Queryable'}</span>
           </button>
         </div>
       </div>
@@ -397,8 +496,9 @@ export const DatasetDetailView: React.FC<DatasetDetailViewProps> = ({
           {dataset.sampleQueries.map((q, idx) => (
             <button
               key={idx}
+              disabled={!isStorageAvailable}
               onClick={() => onOpenQueryWithPrompt?.(dataset.id, q)}
-              className="p-3 rounded-lg bg-slate-50 hover:bg-indigo-50 hover:border-indigo-200 border border-slate-200 text-left transition-colors cursor-pointer group flex items-start justify-between gap-2"
+              className="p-3 rounded-lg bg-slate-50 hover:bg-indigo-50 hover:border-indigo-200 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-200 text-left transition-colors cursor-pointer group flex items-start justify-between gap-2"
             >
               <div className="flex items-center gap-2 text-xs font-medium text-slate-700 group-hover:text-indigo-700">
                 <Search className="w-3.5 h-3.5 text-indigo-600 shrink-0" />

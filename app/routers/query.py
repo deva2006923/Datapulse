@@ -1,12 +1,14 @@
 import uuid
 import json
 import time
+import logging
 import datetime
 from typing import Optional, List, Any
 from fastapi import HTTPException, status, Depends, Query
 from app.routers import TrailingSlashRouter
 from app.database import get_db_connection
 from app.auth import get_current_user
+from app.services.admin_bootstrap import is_admin_email
 from app.schemas import (
     QueryRequest,
     QueryResponse,
@@ -19,6 +21,12 @@ from app.services.marketplace import (
     check_query_permission_and_cost,
     apply_query_marketplace_transaction,
     InsufficientCreditsError
+)
+from app.services.curated_library import (
+    ensure_curated_dataset_hydrated,
+    ensure_community_dataset_hydrated,
+    has_packaged_curated_csv,
+    CuratedHydrationError,
 )
 from app.services.storage import (
     get_dataset_table_name,
@@ -36,11 +44,16 @@ from app.services.nl_query import (
     DatasetNotFoundError,
     DatasetEmptyError,
     AIProviderError,
+    AIProviderRateLimitError,
+    AI_QUOTA_USER_MESSAGE,
+    AI_UNAVAILABLE_USER_MESSAGE,
     SQLValidationError,
     SQLSecurityError,
-    SQLExecutionError
+    SQLExecutionError,
+    _redact_secrets,
 )
 
+logger = logging.getLogger("datapulse.query")
 router = TrailingSlashRouter(tags=["Query & Analysis"])
 
 
@@ -130,14 +143,69 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
                 detail=f"Dataset '{req.dataset_id}' not found"
             )
         target_dataset = dict(dataset_row)
+        ds_visibility = (target_dataset.get("visibility") or "public").strip().lower()
+        is_verified_admin = bool(user.get("is_admin")) and is_admin_email(user.get("email", ""))
+        if ds_visibility == "private" and target_dataset.get("user_id") != user["id"] and not is_verified_admin:
+            exec_ms = int((time.perf_counter() - start_time) * 1000)
+            _log_query_record(
+                conn=conn,
+                user_id=user["id"],
+                query_text=req.query,
+                dataset_id=req.dataset_id,
+                dataset_name="Private Dataset",
+                generated_sql="-- Failed: Private dataset access denied",
+                execution_time_ms=exec_ms,
+                result_count=0,
+                status_str="SQL_REJECTED",
+                credits_charged=0,
+                results_json_dict={"error": "Access denied to private dataset", "status": "FORBIDDEN"},
+                error_message="Access denied to private dataset",
+            )
+            conn.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: this dataset is private and only accessible to its owner or a platform administrator.",
+            )
         matching_names = [target_dataset["name"]]
         relevance_score = 1.0
         datasets = [target_dataset]
     else:
-        cursor.execute("SELECT * FROM datasets ORDER BY created_at DESC")
+        is_verified_admin = bool(user.get("is_admin")) and is_admin_email(user.get("email", ""))
+        if is_verified_admin:
+            cursor.execute(
+                """
+                SELECT * FROM datasets
+                WHERE NOT (COALESCE(is_curated, 0) = 1 AND LOWER(COALESCE(ingestion_status, 'ready')) != 'ingested')
+                ORDER BY created_at DESC
+                """
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT * FROM datasets
+                WHERE NOT (COALESCE(is_curated, 0) = 1 AND LOWER(COALESCE(ingestion_status, 'ready')) != 'ingested')
+                  AND (LOWER(COALESCE(visibility, 'public')) != 'private' OR user_id = ?)
+                ORDER BY created_at DESC
+                """,
+                (user["id"],),
+            )
         all_datasets = [dict(r) for r in cursor.fetchall()]
         existing_tables = get_existing_dataset_ids()
-        available_datasets = [d for d in all_datasets if d["id"] in existing_tables]
+        available_datasets = [
+            d for d in all_datasets
+            if d["id"] in existing_tables
+            or (
+                bool(d.get("is_curated"))
+                and str(d.get("ingestion_status") or "").strip().lower() == "ingested"
+                and bool((d.get("sha256_checksum") or "").strip())
+                and (has_packaged_curated_csv(d["id"]) or bool((d.get("object_storage_key") or "").strip()))
+            )
+            or (
+                not bool(d.get("is_curated"))
+                and bool((d.get("object_storage_key") or "").strip())
+                and bool((d.get("sha256_checksum") or "").strip())
+            )
+        ]
         datasets = available_datasets if available_datasets else all_datasets
         if not datasets:
             exec_ms = int((time.perf_counter() - start_time) * 1000)
@@ -187,13 +255,15 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
     target_dataset_name = target_dataset.get("name", "Unknown Dataset")
     domain = target_dataset.get("domain", "general")
     owner_id = target_dataset.get("user_id")
+    is_curated = bool(target_dataset.get("is_curated"))
 
     # 3. Credit Verification & Marketplace Cost Determination
     try:
         query_cost, owner_reward, is_own_dataset = check_query_permission_and_cost(
             user_id=user["id"],
             dataset_owner_id=owner_id,
-            conn=conn
+            conn=conn,
+            is_curated=is_curated,
         )
     except InsufficientCreditsError as e:
         exec_ms = int((time.perf_counter() - start_time) * 1000)
@@ -216,6 +286,61 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail=str(e)
         )
+
+    # 3b. On-Demand DuckDB Hydration for Curated Public Datasets (verifies SHA-256 & LRU cache)
+    #     and automatic R2 restoration for cloud-backed Community datasets after ephemeral restarts
+    if is_curated:
+        try:
+            ensure_curated_dataset_hydrated(target_dataset)
+        except CuratedHydrationError as e:
+            exec_ms = int((time.perf_counter() - start_time) * 1000)
+            _log_query_record(
+                conn=conn,
+                user_id=user["id"],
+                query_text=req.query,
+                dataset_id=dataset_id,
+                dataset_name=target_dataset_name,
+                generated_sql="-- Failed: Curated dataset hydration unavailable",
+                execution_time_ms=exec_ms,
+                result_count=0,
+                status_str="SQL_REJECTED",
+                credits_charged=0,
+                results_json_dict={"error": str(e), "status": "HYDRATION_FAILED"},
+                error_message=str(e)
+            )
+            conn.commit()
+            raise HTTPException(
+                status_code=e.status_code,
+                detail=str(e)
+            )
+    elif (
+        not dataset_table_exists(dataset_id)
+        and target_dataset.get("object_storage_key")
+        and target_dataset.get("sha256_checksum")
+    ):
+        try:
+            ensure_community_dataset_hydrated(target_dataset)
+        except CuratedHydrationError as e:
+            exec_ms = int((time.perf_counter() - start_time) * 1000)
+            _log_query_record(
+                conn=conn,
+                user_id=user["id"],
+                query_text=req.query,
+                dataset_id=dataset_id,
+                dataset_name=target_dataset_name,
+                generated_sql="-- Failed: Community dataset cloud restoration unavailable",
+                execution_time_ms=exec_ms,
+                result_count=0,
+                status_str="SQL_REJECTED",
+                credits_charged=0,
+                results_json_dict={"error": str(e), "status": "HYDRATION_FAILED"},
+                error_message=str(e)
+            )
+            conn.commit()
+            raise HTTPException(
+                status_code=e.status_code,
+                detail=str(e)
+            )
 
     # 4. Verify DuckDB table and schema
     if not dataset_table_exists(dataset_id):
@@ -299,8 +424,28 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
         )
     except EmptyQueryError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except AIProviderRateLimitError as e:
+        exec_ms = int((time.perf_counter() - start_time) * 1000)
+        safe_detail = e.user_message or AI_QUOTA_USER_MESSAGE
+        _log_query_record(
+            conn=conn,
+            user_id=user["id"],
+            query_text=req.query,
+            dataset_id=dataset_id,
+            dataset_name=target_dataset_name,
+            generated_sql="-- Failed: AI Provider Rate Limit",
+            execution_time_ms=exec_ms,
+            result_count=0,
+            status_str="SQL_REJECTED",
+            credits_charged=0,
+            results_json_dict={"error": safe_detail, "status": "AI_PROVIDER_RATE_LIMITED"},
+            error_message=safe_detail,
+        )
+        conn.commit()
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=safe_detail)
     except AIProviderError as e:
         exec_ms = int((time.perf_counter() - start_time) * 1000)
+        safe_detail = getattr(e, "user_message", None) or str(e)
         _log_query_record(
             conn=conn,
             user_id=user["id"],
@@ -312,13 +457,19 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
             result_count=0,
             status_str="SQL_REJECTED",
             credits_charged=0,
-            results_json_dict={"error": str(e), "status": "SQL_REJECTED"},
-            error_message=str(e)
+            results_json_dict={"error": safe_detail, "status": "SQL_REJECTED"},
+            error_message=safe_detail,
         )
         conn.commit()
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=safe_detail)
     except Exception as e:
         exec_ms = int((time.perf_counter() - start_time) * 1000)
+        logger.error(
+            "Unexpected AI SQL generation failure for dataset=%s user=%s: %s",
+            dataset_id,
+            user["id"],
+            _redact_secrets(str(e)),
+        )
         _log_query_record(
             conn=conn,
             user_id=user["id"],
@@ -330,11 +481,14 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
             result_count=0,
             status_str="SQL_REJECTED",
             credits_charged=0,
-            results_json_dict={"error": str(e), "status": "SQL_REJECTED"},
-            error_message=str(e)
+            results_json_dict={"error": AI_UNAVAILABLE_USER_MESSAGE, "status": "SQL_REJECTED"},
+            error_message=AI_UNAVAILABLE_USER_MESSAGE,
         )
         conn.commit()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"AI SQL generation failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=AI_UNAVAILABLE_USER_MESSAGE,
+        )
 
     # 6. SQL Validation & Security Enforcement
     try:
@@ -450,7 +604,8 @@ def execute_query(req: QueryRequest, user: dict = Depends(get_current_user)):
             query_cost=query_cost,
             owner_reward=owner_reward,
             is_own_dataset=is_own_dataset,
-            now=now
+            now=now,
+            is_curated=is_curated,
         )
         cursor.execute("""
             INSERT INTO queries (

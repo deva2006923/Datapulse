@@ -1,22 +1,21 @@
-# Render Blueprint for DataPulse Backend (FastAPI + SQLite + DuckDB + CSV storage)
-# IMPORTANT: Persistent disks require a paid Render instance (Starter plan or higher).
-# DuckDB holds a single-process file lock, so Uvicorn MUST run with --workers 1.
+# Render Blueprint for DataPulse Backend (100% Free Tier Architecture)
+# - Persistent metadata: Free PostgreSQL supplied securely via DATABASE_URL.
+# - Curated library: 30 verified CSV datasets packaged in data/curated/ + data/curated_manifest.json (no R2 required).
+# - Analytical engine: DuckDB ephemeral cache in /tmp (re-hydrated on demand from packaged CSVs after restarts).
+# - Community uploads: Disabled cleanly in production unless optional Cloudflare R2 credentials are configured.
+# - Single Uvicorn worker (--workers 1) is mandatory for DuckDB single-writer lock safety.
 
 services:
   - type: web
     name: datapulse-backend
     runtime: python
-    plan: starter
+    plan: free
     region: oregon
     branch: main
     autoDeploy: true
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips="*"
     healthCheckPath: /health
-    disk:
-      name: datapulse-persistent-data
-      mountPath: /var/data
-      sizeGB: 10
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
@@ -26,15 +25,29 @@ services:
         value: 0.0.0.0
       - key: MAX_UPLOAD_SIZE_MB
         value: "25"
-      - key: DATABASE_PATH
-        value: /var/data/datapulse.db
+      - key: DATABASE_URL
+        sync: false
       - key: DUCKDB_PATH
-        value: /var/data/datapulse_analytics.duckdb
+        value: /tmp/datapulse_analytics.duckdb
       - key: DATASETS_STORAGE_DIR
-        value: /var/data/datasets
+        value: /tmp/datapulse_datasets
+      - key: CURATED_MANIFEST_PATH
+        value: data/curated_manifest.json
+      - key: CURATED_DATA_DIR
+        value: data/curated
+      - key: CURATED_SYNC_ON_STARTUP
+        value: "true"
+      - key: R2_REQUIRED_IN_PRODUCTION
+        value: "true"
       - key: EMBEDDINGS_ENABLED
         value: "false"
       - key: AI_PROVIDER
+        value: groq
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GROQ_BACKUP_MODELS
+        value: openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.8-27b
+      - key: AI_FALLBACK_PROVIDER
         value: gemini
       - key: GEMINI_MODEL
         value: gemini-2.5-flash
@@ -50,5 +63,9 @@ services:
         value: "1"
       - key: SECRET_KEY
         generateValue: true
+      - key: GROQ_API_KEY
+        sync: false
       - key: GEMINI_API_KEY
+        sync: false
+      - key: ADMIN_PASSWORD
         sync: false

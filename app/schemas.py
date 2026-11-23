@@ -60,6 +60,21 @@ class DatasetDetailResponse(BaseModel):
     domain_relevance_score: Optional[float] = None
     overall_score: Optional[float] = None
     credits_awarded: Optional[int] = None
+    is_curated: bool = Field(default=False, description="Whether dataset belongs to the Curated Public Library")
+    dataset_type: str = Field(default="community", description="Dataset origin: community or curated")
+    source_name: Optional[str] = Field(default=None, description="Authoritative public source organization")
+    source_url: Optional[str] = Field(default=None, description="Verified source URL")
+    license: Optional[str] = Field(default=None, description="Verified open reuse license")
+    license_url: Optional[str] = Field(default=None, description="Canonical license URL")
+    retrieved_at: Optional[str] = Field(default=None, description="ISO timestamp when dataset snapshot was retrieved")
+    ingestion_status: Optional[str] = Field(default="ready", description="ready, pending_ingestion, ingested, or failed")
+    sha256_checksum: Optional[str] = Field(default=None, description="SHA-256 checksum of canonical CSV")
+    source_version: Optional[str] = Field(default=None, description="Manifest source snapshot version")
+    visibility: str = Field(default="public", description="Dataset visibility: public or private")
+
+
+class DatasetVisibilityUpdateRequest(BaseModel):
+    visibility: str = Field(description="Target visibility: public or private")
 
 
 class DatasetListResponse(BaseModel):
@@ -90,12 +105,27 @@ class SearchRequest(BaseModel):
 
 class SearchItem(BaseModel):
     dataset_id: str
+    user_id: Optional[str] = None
     name: str
+    filename: Optional[str] = None
     domain: str
     score: float
     summary: str
     rows_count: int
+    columns_count: Optional[int] = None
     unlock_price: int = Field(default=10, description="Dataset-specific unlock price in credits")
+    unlocked_by: List[str] = Field(default_factory=list)
+    quality_score: Optional[float] = None
+    domain_relevance_score: Optional[float] = None
+    overall_score: Optional[float] = None
+    storage_available: Optional[bool] = None
+    availability: Optional[str] = None
+    is_curated: bool = False
+    dataset_type: str = "community"
+    visibility: str = "public"
+    license: Optional[str] = None
+    source_name: Optional[str] = None
+    created_at: Optional[str] = None
 
 class SearchResponse(BaseModel):
     query: str

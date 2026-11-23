@@ -80,10 +80,13 @@ def _norm_ts_sql(col: str) -> str:
 
 
 def _bucket_sql(col: str, granularity: str) -> str:
+    from app.database import is_postgres_backend
     date_expr = _norm_date_sql(col)
     if granularity == "monthly":
         return f"SUBSTR({date_expr}, 1, 7)"
     if granularity == "weekly":
+        if is_postgres_backend():
+            return f"TO_CHAR(CAST({date_expr} AS TIMESTAMP), 'IYYY-\"W\"IW')"
         return f"strftime('%Y-W%W', {date_expr})"
     return date_expr
 

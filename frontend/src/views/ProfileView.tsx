@@ -140,11 +140,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 <button
                   key={demo.key}
                   onClick={() => onSwitchUser(demo.key)}
-                  className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
-                    isCurrent
+                  className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${isCurrent
                       ? 'bg-indigo-50/60 border-indigo-300 ring-2 ring-indigo-500/20'
                       : 'bg-slate-50 border-slate-200 hover:bg-slate-100/60'
-                  }`}
+                    }`}
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-bold text-slate-900">{demo.full_name}</span>

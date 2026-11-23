@@ -35,12 +35,13 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
   const [tags, setTags] = useState<string[]>(['churn', 'telecom', 'analytics']);
   const [tagInput, setTagInput] = useState<string>('');
   const [license, setLicense] = useState<string>('MIT');
+  const [visibility, setVisibility] = useState<'public' | 'private'>('public');
 
   // Step 2: File Drop Zone
   const [selectedFile, setSelectedFile] = useState<{
     name: string;
     sizeMb: number;
-    type: 'csv' | 'xlsx';
+    type: 'csv';
     rawFile?: File;
   } | null>(null);
   const [fileProgress, setFileProgress] = useState<number>(0);
@@ -90,23 +91,22 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
 
     const lowerName = file.name.toLowerCase();
     const isCsv = lowerName.endsWith('.csv');
-    const isXlsx = lowerName.endsWith('.xlsx');
 
-    if (!isCsv && !isXlsx) {
-      setFileError('Invalid file type. Drop zone accepts ONLY CSV and XLSX files.');
+    if (!isCsv) {
+      setFileError('Invalid file type. Please upload a .csv file.');
       return;
     }
 
     const sizeMb = file.size / (1024 * 1024);
-    if (sizeMb > 50) {
-      setFileError('File exceeds maximum size of 50 MB.');
+    if (sizeMb > 25) {
+      setFileError('File exceeds maximum size of 25 MB.');
       return;
     }
 
     setSelectedFile({
       name: file.name,
       sizeMb: +sizeMb.toFixed(2),
-      type: isCsv ? 'csv' : 'xlsx',
+      type: 'csv',
       rawFile: file,
     });
 
@@ -153,7 +153,8 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
       const res = await api.datasets.upload(
         selectedFile.rawFile,
         category.toLowerCase(),
-        name.trim()
+        name.trim(),
+        visibility
       );
 
       clearInterval(progressTimer);
@@ -239,6 +240,7 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
         },
       ],
       unlockedBy: [currentUser.id],
+      visibility: uploadedDataset.visibility === 'private' ? 'private' : visibility,
       sampleQueries: [],
     };
 
@@ -275,13 +277,12 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
             {[1, 2, 3].map((step) => (
               <div key={step} className="flex items-center gap-2">
                 <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold transition-colors ${
-                    currentStep === step
+                  className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold transition-colors ${currentStep === step
                       ? 'bg-indigo-600 text-white'
                       : currentStep > step
-                      ? 'bg-emerald-100 text-emerald-800'
-                      : 'bg-slate-100 text-slate-500'
-                  }`}
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-slate-100 text-slate-500'
+                    }`}
                 >
                   {currentStep > step ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : step}
                 </div>
@@ -317,9 +318,8 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className={`w-full bg-slate-50 border rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none ${
-                  isNameValid ? 'border-slate-300 focus:border-indigo-500' : 'border-red-300 focus:border-red-500'
-                }`}
+                className={`w-full bg-slate-50 border rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none ${isNameValid ? 'border-slate-300 focus:border-indigo-500' : 'border-red-300 focus:border-red-500'
+                  }`}
                 placeholder="e.g. Telecom Customer Churn Q4"
               />
               {!isNameValid && (
@@ -341,9 +341,8 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
                 rows={3}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                className={`w-full bg-slate-50 border rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none ${
-                  isDescValid ? 'border-slate-300 focus:border-indigo-500' : 'border-red-300 focus:border-red-500'
-                }`}
+                className={`w-full bg-slate-50 border rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none ${isDescValid ? 'border-slate-300 focus:border-indigo-500' : 'border-red-300 focus:border-red-500'
+                  }`}
                 placeholder="Summarize the dataset content, schema attributes, and business usage context..."
               />
               {!isDescValid && (
@@ -353,7 +352,7 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               {/* Category */}
               <div>
                 <label className="text-xs font-semibold text-slate-700 block mb-1">
@@ -388,6 +387,21 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
                   <option value="Open Data Commons">Open Data Commons</option>
                   <option value="CC-BY-4.0">Creative Commons CC-BY-4.0</option>
                   <option value="Apache 2.0">Apache 2.0</option>
+                </select>
+              </div>
+
+              {/* Visibility */}
+              <div>
+                <label className="text-xs font-semibold text-slate-700 block mb-1">
+                  Visibility
+                </label>
+                <select
+                  value={visibility}
+                  onChange={(e) => setVisibility(e.target.value === 'private' ? 'private' : 'public')}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="public">Public (Community Marketplace)</option>
+                  <option value="private">Private (Only My Datasets)</option>
                 </select>
               </div>
             </div>
@@ -468,7 +482,7 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
               Step 2: File Upload
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Upload your structured data file. Accepting ONLY CSV and XLSX files up to 50 MB.
+              Upload your structured data file. Accepting CSV files up to 25 MB.
             </p>
           </div>
 
@@ -483,7 +497,7 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
           >
             <input
               type="file"
-              accept=".csv,.xlsx"
+              accept=".csv"
               onChange={handleFileDrop}
               className="hidden"
             />
@@ -494,7 +508,7 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
               Drop file here or click to browse
             </h3>
             <p className="text-xs text-slate-500 mt-1 font-medium">
-              CSV or XLSX, up to 50 MB
+              CSV only, up to 25 MB
             </p>
           </label>
 
@@ -588,13 +602,12 @@ export const UploadWizardView: React.FC<UploadWizardViewProps> = ({
                 return (
                   <div
                     key={stg}
-                    className={`p-3 rounded-lg border text-center transition-colors text-xs ${
-                      isPassed
+                    className={`p-3 rounded-lg border text-center transition-colors text-xs ${isPassed
                         ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
                         : isCurrent
-                        ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-semibold'
-                        : 'bg-slate-50 border-slate-200 text-slate-400'
-                    }`}
+                          ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-semibold'
+                          : 'bg-slate-50 border-slate-200 text-slate-400'
+                      }`}
                   >
                     <div className="text-[10px] uppercase font-bold tracking-wider mb-0.5">
                       Stage {idx + 1}
